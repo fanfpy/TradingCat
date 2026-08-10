@@ -22,7 +22,7 @@
 #   - Python API（from longbridge.openapi import ...），由
 #     shared/longbridge_client.py 延迟加载；生产路径只用 Legacy API Key，
 #     不调用 CLI/OAuth。
-longbridge==0.2.74
+longbridge==4.4.3
 
 # PyYAML：解析 config.yaml 配置模板（部署时校验 / 读取配置用）。
 #   校验命令：python3 -c "import yaml; yaml.safe_load(open('config.yaml'))"
