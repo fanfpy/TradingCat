@@ -1,0 +1,46 @@
+# TradingCat 统一调度定时器 — tc-schedule.timer
+# 触发交易状态、监控、对账和备份时刻，由 tc-scheduler.service 按
+# 当前时刻分发执行对应任务。
+#
+# 启用：
+#   systemctl enable --now tc-schedule.timer
+# 查看：
+#   systemctl list-timers tc-schedule.timer
+#   systemctl status tc-schedule.timer
+# 时间（北京时间 Asia/Shanghai，对齐现有开发环境 cron 调度，可自行调整）：
+#   盘前 pre    周一~周五 20:00 / 20:20
+#   盘中 intra  周二~周六 23:00 / 23:20
+#   盘后 post   周三~周日 06:00 / 06:20
+#   订阅报告    周一~周五 17:35
+#   状态同步    周一~周五 19:40；周二~周六 06:30
+#   风险检查    周一~周五 19:45；周二~周六 06:35
+#   订单对账    周一~周五 19:50；周二~周六 06:40
+#   备份        每日 06:50；周日 07:10
+# 注意：OnCalendar 的星期范围用 .. 语法（systemd.time(7)）。
+
+[Unit]
+Description=TradingCat schedule timer (状态同步/风控/对账/监控/备份)
+Requires=tc-scheduler.service
+
+[Timer]
+OnCalendar=Mon..Fri 20:00:00 Asia/Shanghai
+OnCalendar=Mon..Fri 20:20:00 Asia/Shanghai
+OnCalendar=Tue..Sat 23:00:00 Asia/Shanghai
+OnCalendar=Tue..Sat 23:20:00 Asia/Shanghai
+OnCalendar=Wed..Sun 06:00:00 Asia/Shanghai
+OnCalendar=Wed..Sun 06:20:00 Asia/Shanghai
+OnCalendar=Mon..Fri 17:35:00 Asia/Shanghai
+OnCalendar=Mon..Fri 19:40:00 Asia/Shanghai
+OnCalendar=Mon..Fri 19:45:00 Asia/Shanghai
+OnCalendar=Mon..Fri 19:50:00 Asia/Shanghai
+OnCalendar=Tue..Sat 06:30:00 Asia/Shanghai
+OnCalendar=Tue..Sat 06:35:00 Asia/Shanghai
+OnCalendar=Tue..Sat 06:40:00 Asia/Shanghai
+OnCalendar=*-*-* 06:50:00 Asia/Shanghai
+OnCalendar=Sun *-*-* 07:10:00 Asia/Shanghai
+# 交易时点任务不补跑，避免重启后执行已经过时的监控/风控动作。
+Persistent=false
+Unit=tc-scheduler.service
+
+[Install]
+WantedBy=timers.target

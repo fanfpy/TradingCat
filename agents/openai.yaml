@@ -1,0 +1,4 @@
+interface:
+  display_name: "TradingCat"
+  short_description: "Quant research, monitoring, portfolio, and safe execution"
+  default_prompt: "Use $trading-system to analyze a stock, validate its strategy evidence, and explain the safe next action."

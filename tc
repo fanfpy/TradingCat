@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# tc — TradingCat 统一 CLI 入口（可迁移，不依赖 QwenPaw 绝对路径）
+set -euo pipefail
+
+_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+export PYTHONPATH="${_DIR}:${PYTHONPATH:-}"
+_PYTHON="${_DIR}/.venv/bin/python"
+if [[ ! -x "${_PYTHON}" ]]; then
+    _PYTHON="python3"
+fi
+exec "${_PYTHON}" "${_DIR}/tc.py" "$@"

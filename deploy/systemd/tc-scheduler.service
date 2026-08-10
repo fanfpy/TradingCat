@@ -1,0 +1,30 @@
+# TradingCat 调度分发器 — tc-scheduler.service
+# 由 tc-schedule.timer 触发；按当前时刻（HH:MM）调用 tc-scheduler.sh 分发
+# 到对应监控任务（tc-pre / tc-intra / tc-post / tc-subscribe 的命令）。
+# 日志：journalctl -u tc-scheduler.service -f，及 ${TS_ROOT}/deploy/logs/dispatcher.log
+#
+# 注意：${TS_ROOT} 为占位符，部署前替换为 trading-system 实际路径：
+#   sed -i 's|\${TS_ROOT}|/opt/tradingcat/skills/trading-system|g' deploy/systemd/tc-*.service
+
+[Unit]
+Description=TradingCat scheduler dispatcher (按时刻分发监控任务)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=TS_ROOT=${TS_ROOT}
+# 推荐方式下任务由此服务直接执行（不经 tc-pre/intra/post/subscribe.service），
+# 长桥 OpenAPI token 需在此声明（也可在 tc-scheduler.sh 顶部 export）：
+# Environment=LONGBRIDGE_APP_KEY=your_app_key
+# Environment=LONGBRIDGE_APP_SECRET=your_app_secret
+# Environment=LONGBRIDGE_ACCESS_TOKEN=your_access_token
+# 可选：自定义 DB 路径（缺省 ${TS_ROOT}/shared/trading.db）：
+# Environment=TRADING_DB=/path/to/trading.db
+# 可选：订阅报告推送 webhook（推荐方式下订阅推送需要；未配置则只落盘）：
+# Environment=TRADINGCAT_WEBHOOK_URL=https://your.webhook.example/hook
+# Python SDK 可选区域覆盖；通常留空，亚太账户且大陆网络需要时可设 cn：
+ExecStart=/bin/bash ${TS_ROOT}/deploy/systemd/tc-scheduler.sh
+
+[Install]
+WantedBy=multi-user.target

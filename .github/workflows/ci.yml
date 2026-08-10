@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+    env:
+      TRADINGCAT_ENV_FILE: /tmp/tradingcat-public-ci-no-env
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Check dependencies and public artifacts
+        run: |
+          python -m pip check
+          python scripts/check_open_source.py
+      - name: Run unit and integration tests
+        run: python -m pytest -q
+      - name: Run offline end-to-end simulation
+        run: python e2e_full.py
+      - name: Build distribution
+        if: matrix.python-version == '3.11'
+        run: |
+          python -m build
+          python scripts/check_distribution.py

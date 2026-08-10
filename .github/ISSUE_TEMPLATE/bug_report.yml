@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible TradingCat defect without secrets or account data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, account IDs, positions, broker order IDs, or private logs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Execution mode
+      options: ["Analysis/read-only", "DRY_RUN", "LIVE Canary", "Not applicable"]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic/redacted data only.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Include relevant warnings, exit codes, and lineage IDs after redaction.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed all secrets, account data, positions, and broker order IDs.
+          required: true
+        - label: This is not a privately reportable security vulnerability.
+          required: true

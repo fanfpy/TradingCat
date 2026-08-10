@@ -1,0 +1,43 @@
+# 运行期生成物，不入库（US-003 在线备份等）
+data/
+
+# 敏感凭证（含长桥 token），绝不入库；模板见 .env.example
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python 字节码
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# 生产数据库与迁移旧备份（运行期生成，不入库）
+shared/trading.db
+shared/trading.db.bak_*
+*.db
+*.db-*
+*.db.bak*
+
+# 订阅报告（运行期生成，不入库）
+reports/
+
+# core dump
+core.*
+
+# Python 构建产物
+build/
+dist/
+*.egg-info/
+
+# 编辑器与操作系统生成物
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log

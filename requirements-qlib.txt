@@ -1,0 +1,3 @@
+# 可选 P4 研究依赖。生产交易、NativeBacktestEngine 不依赖 Qlib。
+-r requirements.txt
+pyqlib

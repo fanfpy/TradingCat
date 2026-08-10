@@ -1,0 +1,36 @@
+# TradingCat 交易系统 — Python 依赖清单
+# =====================================================================
+# 生成方式：python 扫描 shared/ production/ research/ execution/ 全部 .py 的
+# import（含函数内 lazy import），与实际情况核对后列出。
+# **不含任何 QwenPaw / agentscope 包** —— 本系统可脱离 QwenPaw 独立运行，
+# 任意机器 `pip install -r requirements.txt` + 配置环境变量后即可使用。
+#
+# 实测扫描结论：
+#   - pandas / numpy：research/ic_analysis.py 顶层无条件 import（量价因子
+#     IC/IR 分析），是正式研究脚本的运行时依赖，必须安装。
+#   - pyarrow / apscheduler：未被任何代码 import，无需安装（保留说明以免
+#     误加）。
+#   - 其余核心业务代码为纯标准库实现（sqlite3/subprocess/urllib 等），
+#     唯一需要 Python 包依赖的数据源是 longbridge SDK；OpenAlice 当前基本面补充
+#     通过可选 JSON-stdio adapter 接入，不引入 Agent/TraderHub 包依赖。
+# ---------------------------------------------------------------------
+
+# ── 运行时依赖 ────────────────────────────────────────────────────────
+# longbridge：固定兼容版 0.2.74，PyPI 提供常规平台 wheel，无需 Rust/源码编译。
+#   - 该版本覆盖行情、日线、账户与订单 API；不含 FundamentalContext；
+#   - 基本面按 Provider 能力安全降级，可由 OpenAlice 补充当前分析，但不得回填历史 PIT；
+#   - Python API（from longbridge.openapi import ...），由
+#     shared/longbridge_client.py 延迟加载；生产路径只用 Legacy API Key，
+#     不调用 CLI/OAuth。
+longbridge==0.2.74
+
+# PyYAML：解析 config.yaml 配置模板（部署时校验 / 读取配置用）。
+#   校验命令：python3 -c "import yaml; yaml.safe_load(open('config.yaml'))"
+PyYAML>=6.0
+
+# pandas / numpy：research/ic_analysis.py（量价因子 IC/IR 分析）运行时依赖，
+#   后续研究脚本也会用到；>= 下限仅为确保现代 API（如 pandas groupby 语义）。
+pandas>=2.0
+numpy>=1.24
+
+# 测试与开源发布工具见 requirements-dev.txt。

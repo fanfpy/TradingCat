@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradingcat-core"
+version = "5.0.0"
+description = "Agent-independent personal quantitative research and execution core"
+readme = { file = "README_EN.md", content-type = "text/markdown" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.10"
+keywords = ["quantitative-finance", "backtesting", "portfolio", "trading", "agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+  "longbridge==0.2.74",
+  "PyYAML>=6.0",
+  "pandas>=2.0",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+qlib = ["pyqlib"]
+vectorbt = ["vectorbt"]
+
+[project.scripts]
+tradingcat = "tc:main"
+tradingcat-json = "application.cli:main"
+
+[tool.setuptools]
+py-modules = ["tc"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["application*", "execution*", "production*", "research*", "shared*"]
+
+[tool.pytest.ini_options]
+testpaths = ["application", "execution/tests", "production/tests", "research", "shared"]

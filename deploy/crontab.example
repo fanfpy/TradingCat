@@ -1,0 +1,65 @@
+# =============================================================================
+# TradingCat 调度模板 — crontab 版本（交易状态 / 监控 / 对账 / 备份）
+# =============================================================================
+# 用法：
+#   1) 替换占位符 ${TS_ROOT} 为 trading-system 实际路径，例如：
+#      sed -i 's|\${TS_ROOT}|/opt/tradingcat/skills/trading-system|g' crontab.example
+#   2) 确认 python3 可用（命令中使用 python3，cron 的 PATH 通常不含 /usr/local/bin，
+#      如有需要可把 python3 改为绝对路径 /usr/bin/python3）
+#   3) 准备日志目录：mkdir -p ${TS_ROOT}/deploy/logs
+#   4) 安装（覆盖当前 crontab）：
+#      crontab crontab.example
+#      或合并安装（保留已有任务）：
+#      crontab -l > /tmp/cron.merge 2>/dev/null; cat crontab.example >> /tmp/cron.merge; crontab /tmp/cron.merge
+#   5) 查看：crontab -l；日志：tail -f ${TS_ROOT}/deploy/logs/*.log
+#
+# 调度语义（对齐现有开发环境 cron 调度，北京时间 Asia/Shanghai）：
+#   盘前 pre    20:00 / 20:20  周一~周五   美股开盘前准备：入场区域 / 吊灯止损 / 保护单缺失
+#   盘中 intra  23:00 / 23:20  周二~周六   美股交易时段临界预警（距边界/止损 <= 1%）
+#   盘后 post   06:00 / 06:20  周三~周日   美股收盘后正式确认：入场 / 退出 / 止损上移 / 账本更新
+#   订阅报告    17:35          周一~周五   生成日频订阅报告并（可选）推送
+#   状态同步    19:40 / 06:30  交易日前后   资产 + PositionSync；异常即 fail closed
+#   风险检查    19:45 / 06:35  交易日前后   当前组合硬门槛检查
+#   订单对账    19:50 / 06:40  交易日前后   全部非终态计划 broker/local reconcile
+#   在线备份    06:50 / 周日07:10          WAL-safe 日备份 / 周归档
+#   如需调整运行时刻，直接修改每行前 5 个时间字段即可。
+# =============================================================================
+
+# 环境变量：cron 每次执行都是全新环境，需在此声明（变量行以 KEY=VALUE 开头且无命令部分）
+CRON_TZ=Asia/Shanghai
+TZ=Asia/Shanghai
+TS_ROOT=/opt/tradingcat/skills/trading-system
+# 长桥 OpenAPI token（如未设置，长桥相关功能不可用；变量名与代码一致）：
+# LONGBRIDGE_APP_KEY=your_app_key
+# LONGBRIDGE_APP_SECRET=your_app_secret
+# LONGBRIDGE_ACCESS_TOKEN=your_access_token
+# 可选：自定义 DB 路径（缺省 ${TS_ROOT}/shared/trading.db）：
+# TRADING_DB=/path/to/trading.db
+# Python SDK 可选区域覆盖；通常留空，亚太账户且大陆网络需要时可设 cn：
+# 可选：推送 webhook（未配置则只落盘报告文件）：
+# TRADINGCAT_WEBHOOK_URL=https://your.webhook.example/hook
+
+# ---------------- 交易核心状态任务（独立于 AI/通知）--------------------------
+40 19 * * 1-5 cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py account sync >> ${TS_ROOT}/deploy/logs/account-sync.log 2>&1
+45 19 * * 1-5 cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py risk check >> ${TS_ROOT}/deploy/logs/risk-check.log 2>&1
+50 19 * * 1-5 cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py execution reconcile >> ${TS_ROOT}/deploy/logs/reconcile.log 2>&1
+30 6 * * 2-6  cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py account sync >> ${TS_ROOT}/deploy/logs/account-sync.log 2>&1
+35 6 * * 2-6  cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py risk check >> ${TS_ROOT}/deploy/logs/risk-check.log 2>&1
+40 6 * * 2-6  cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py execution reconcile >> ${TS_ROOT}/deploy/logs/reconcile.log 2>&1
+50 6 * * *    cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py backup daily >> ${TS_ROOT}/deploy/logs/backup.log 2>&1
+10 7 * * 0    cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py backup weekly >> ${TS_ROOT}/deploy/logs/backup.log 2>&1
+
+# ---------------- 盘前 pre（周一~周五 20:00 / 20:20 北京时间）----------------
+0 20 * * 1-5  cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py monitor pre --scope portfolio >> ${TS_ROOT}/deploy/logs/pre-portfolio.log 2>&1
+20 20 * * 1-5 cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py monitor pre --scope watchlist >> ${TS_ROOT}/deploy/logs/pre-watchlist.log 2>&1
+
+# ---------------- 盘中 intra（周二~周六 23:00 / 23:20 北京时间）---------------
+0 23 * * 2-6  cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py monitor intra --scope portfolio >> ${TS_ROOT}/deploy/logs/intra-portfolio.log 2>&1
+20 23 * * 2-6 cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py monitor intra --scope watchlist >> ${TS_ROOT}/deploy/logs/intra-watchlist.log 2>&1
+
+# ---------------- 盘后 post（周三~周日 06:00 / 06:20 北京时间）----------------
+0 6 * * 3-7   cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py monitor post --scope portfolio >> ${TS_ROOT}/deploy/logs/post-portfolio.log 2>&1
+20 6 * * 3-7  cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py monitor post --scope watchlist >> ${TS_ROOT}/deploy/logs/post-watchlist.log 2>&1
+
+# ---------------- 订阅报告（周一~周五 17:35 北京时间）-------------------------
+35 17 * * 1-5 cd ${TS_ROOT} && PYTHONPATH=. python3 tc.py subscribe run >> ${TS_ROOT}/deploy/logs/subscribe.log 2>&1

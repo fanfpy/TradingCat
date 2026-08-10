@@ -1,0 +1,11 @@
+include LICENSE NOTICE README.md README_EN.md CONTRIBUTING.md SECURITY.md DISCLAIMER.md
+include SKILL.md .env.example config.yaml requirements*.txt tc
+recursive-include agents *.yaml
+recursive-include docs *.md
+recursive-include deploy *.example *.service *.timer *.sh
+recursive-include scripts *.py
+recursive-include static *.svg
+prune data
+prune reports
+prune .venv
+global-exclude __pycache__ *.py[cod] *.db *.db-* *.pem *.key .env

@@ -1,0 +1,32 @@
+# TradingCat 盘后监控 — tc-post.service
+# 任务：盘后 post（美股收盘后正式确认）：入场 / 退出触发 / 止损上移 / 模拟账本更新
+# 触发：tc-schedule.timer（周三~周日 06:00/06:20 北京时间），或手动：
+#   systemctl start tc-post.service
+# 日志：journalctl -u tc-post.service -f
+#
+# 注意：${TS_ROOT} 为占位符，部署前替换为 trading-system 实际路径：
+#   sed -i 's|\${TS_ROOT}|/opt/tradingcat/skills/trading-system|g' deploy/systemd/tc-*.service
+
+[Unit]
+Description=TradingCat post-market monitor (盘后：正式确认/止损上移/账本)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${TS_ROOT}
+Environment=PYTHONPATH=${TS_ROOT}
+# 可选：微信推送 webhook（未配置则只落盘报告文件）：
+# Environment=TRADINGCAT_WEBHOOK_URL=https://your.webhook.example/hook
+# 长桥 OpenAPI token（如未设置，长桥相关功能不可用；变量名与代码一致）：
+# Environment=LONGBRIDGE_APP_KEY=your_app_key
+# Environment=LONGBRIDGE_APP_SECRET=your_app_secret
+# Environment=LONGBRIDGE_ACCESS_TOKEN=your_access_token
+# 可选：自定义 DB 路径（缺省 ${TS_ROOT}/shared/trading.db）：
+# Environment=TRADING_DB=/path/to/trading.db
+# Python SDK 可选区域覆盖；通常留空，亚太账户且大陆网络需要时可设 cn：
+ExecStart=/usr/bin/python3 ${TS_ROOT}/tc.py monitor post --scope portfolio
+ExecStart=/usr/bin/python3 ${TS_ROOT}/tc.py monitor post --scope watchlist
+
+[Install]
+WantedBy=multi-user.target

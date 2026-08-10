@@ -1,0 +1,3 @@
+# 可选快速研究扫描；最终精算仍必须使用 NativeBacktestEngine。
+-r requirements.txt
+vectorbt

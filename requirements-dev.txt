@@ -1,0 +1,4 @@
+# 开发与公共 CI 依赖。
+-r requirements.txt
+pytest>=7.0
+build>=1.2
