@@ -89,6 +89,7 @@ def main():
     print(f"模式: DRY_RUN（全程不触达券商）")
 
     conn = dbm.get_conn(":memory:")
+    reconcile_core = dbm.get_core_conn(":memory:")
 
     # ── Phase 1: DataHub ──
     print("\n--- Phase 1: DataHub ---")
@@ -98,6 +99,8 @@ def main():
         "GAMMA.US": {"trend": "flat", "base": 50.0},
     }
     for sym, cfg in symbols.items():
+        dbm.upsert_security(
+            conn, sym, sym, "NASDAQ", "USD", asset_type="EQUITY", lot_size=1)
         # 504 根开发区 + 至少 126 根一次性 Holdout；留足余量给 nested WF。
         bars = gen_bars(800, cfg["trend"], cfg["base"])
         cache_bars(conn, sym, bars, source="simulation",
@@ -246,7 +249,7 @@ def main():
         status = dbm.get_intent(conn, intent_id)["status"]
         print(f"  {sym}: full {qty}/{qty}  status={status}")
         assert status == "FILLED"
-    rec = Reconciliation(conn)
+    rec = Reconciliation(reconcile_core, conn, None)
     r = rec.reconcile_plan(plan.plan_id)
     print(f"  Reconciliation: ok={r['ok']}")
     assert r["ok"]

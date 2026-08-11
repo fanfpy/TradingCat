@@ -345,10 +345,12 @@ def test_12_broker_local_mismatch_fail_closed(conn):
     intent = dbm.list_intents(conn, "p_mm")[0]
     BrokerEventHandler(conn).handle({"type": "submitted", "intent_id": intent["intent_id"],
                                      "broker_order_id": "bo_mm"})
-    rec = Reconciliation(conn)  # 无 broker → 查不到
+    core_conn = dbm.get_core_conn(":memory:")
+    dbm.upsert_account(core_conn, "default", "SYNCED")
+    rec = Reconciliation(core_conn, conn, None)  # 无 broker → 查不到
     r = rec.reconcile_plan("p_mm")
     assert not r["ok"]
-    assert dbm.get_account(conn, "default")["sync_status"] == "MISMATCH"
+    assert dbm.get_account(core_conn, "default")["sync_status"] == "MISMATCH"
     # MISMATCH → 新计划 PreTradeRisk REJECT
     plan = make_plan(plan_id="p_after_mm")
     svc = ConfirmationService(conn)
@@ -377,7 +379,9 @@ def test_reconciliation_reads_sqlite_rows_and_accepts_matching_broker_state(conn
             assert broker_order_id == "bo_rec"
             return {"status": "Submitted"}
 
-    result = Reconciliation(conn, broker=MatchingBroker()).reconcile_plan(plan.plan_id)
+    core_conn = dbm.get_core_conn(":memory:")
+    result = Reconciliation(
+        core_conn, conn, MatchingBroker()).reconcile_plan(plan.plan_id)
     assert result == {"ok": True, "mismatches": []}
 
 

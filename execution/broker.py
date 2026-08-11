@@ -135,13 +135,15 @@ class BrokerEventHandler:
 class Reconciliation:
     """broker/local 对账。不一致 → fail closed（AccountState = MISMATCH）。"""
 
-    def __init__(self, conn, broker=None):
-        self.conn = conn
+    def __init__(self, core_conn, execution_conn, broker):
+        dbm.assert_separate_stores(core_conn, execution_conn)
+        self.core_conn = core_conn
+        self.execution_conn = execution_conn
         self.broker = broker  # broker 需提供 order_state(broker_order_id) -> dict 或 positions()
 
     def reconcile_plan(self, plan_id: str) -> Dict:
-        intents = dbm.list_intents(self.conn, plan_id)
-        plan = dbm.get_plan(self.conn, plan_id)
+        intents = dbm.list_intents(self.execution_conn, plan_id)
+        plan = dbm.get_plan(self.execution_conn, plan_id)
         account_id = plan["account_id"] if plan is not None else "default"
         mismatches: List[str] = []
         for it in intents:
@@ -153,12 +155,12 @@ class Reconciliation:
             if not broker_order_id:
                 if it["status"] != "PENDING":
                     mismatches.append(f"{it['client_request_id']} 缺 broker_order_id")
-                    dbm.set_intent_status(self.conn, it["intent_id"], "UNKNOWN")
+                    dbm.set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN")
                 continue
             bo = self.broker.order_state(broker_order_id)
             if bo is None:
                 mismatches.append(f"{it['client_request_id']} broker 无此订单")
-                dbm.set_intent_status(self.conn, it["intent_id"], "UNKNOWN")
+                dbm.set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN")
                 continue
             normalized = normalize_broker_status(bo.get("status"))
             if normalized != it["status"] and not (
@@ -167,14 +169,14 @@ class Reconciliation:
                     f"{it['client_request_id']} local={it['status']} broker={normalized}")
         ok = not mismatches
         if not ok:
-            dbm.set_account_sync_status(self.conn, account_id, "MISMATCH")
-        dbm.audit(self.conn, "RECONCILE", entity_type="plan", entity_id=plan_id,
+            dbm.set_account_sync_status(self.core_conn, account_id, "MISMATCH")
+        dbm.audit(self.execution_conn, "RECONCILE", entity_type="plan", entity_id=plan_id,
                   payload={"ok": ok, "mismatches": mismatches})
         return {"ok": ok, "mismatches": mismatches}
 
     def reconcile_all(self) -> Dict:
         """批量对账所有含非终态订单的计划；任一失败即整体失败。"""
-        plan_ids = dbm.plan_ids_for_reconciliation(self.conn)
+        plan_ids = dbm.plan_ids_for_reconciliation(self.execution_conn)
         results = {plan_id: self.reconcile_plan(plan_id) for plan_id in plan_ids}
         mismatches = [
             f"{plan_id}: {message}"
@@ -194,7 +196,8 @@ class Reconciliation:
 # ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    conn = dbm.get_conn(":memory:")
+    core_conn = dbm.get_core_conn(":memory:")
+    conn = dbm.get_execution_conn(":memory:")
     eh = BrokerEventHandler(conn)
     from shared import db as dbm
     # 造 intent
@@ -227,7 +230,7 @@ if __name__ == "__main__":
     dbm.insert_intent(conn, "cr_test_3", "p2", "1", "SCO.US", "BUY", 80)
     iid3 = dbm.list_intents(conn, "p2")[0]["intent_id"]
     eh.handle({"type": "submitted", "intent_id": iid3, "broker_order_id": "bo3"})
-    rec = Reconciliation(conn)  # 无 broker
+    rec = Reconciliation(core_conn, conn, None)  # 无 broker
     r = rec.reconcile_plan("p2")
     assert not r["ok"]
     acc = dbm.get_account(conn, "default")

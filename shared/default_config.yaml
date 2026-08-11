@@ -1,0 +1,19 @@
+database:
+  core_path: trading.db
+  execution_path: execution.db
+
+quota:
+  longbridge_daily: 1000
+
+report:
+  directory: reports
+  backup_directory: data/backups
+
+monitor:
+  scope: portfolio
+  critical_distance_pct: 1.0
+
+research:
+  grid: full
+  min_bars: 630
+  prefilter_min_bars: 504

@@ -41,7 +41,7 @@ def main():
                         help="只打印 grid 大小与批次清单，不跑研究")
     args = parser.parse_args()
 
-    conn = dbm.get_conn()
+    conn = dbm.get_core_conn()
     grid = None if args.grid == "full" else PARAM_GRID_ADX
     grid_size = len(PARAM_GRID) if args.grid == "full" else len(PARAM_GRID_ADX)
     print(f"grid={args.grid} size={grid_size}", flush=True)
@@ -90,7 +90,12 @@ def main():
                               "score": score, "reason": res.get("reasons", [])},
                              ensure_ascii=False), flush=True)
         except Exception as e:
-            results["failed"].append((sym, str(e)[:120]))
+            results["failed"].append({
+                "symbol": sym,
+                "error_type": type(e).__name__,
+                "error_message": str(e)[:300],
+                "retryable": bool(getattr(e, "retryable", False)),
+            })
             print(json.dumps({"i": i, "total": len(todo), "symbol": sym,
                               "old_status": old_status, "new_status": "failed",
                               "score": None, "reason": str(e)[:120]}, ensure_ascii=False),

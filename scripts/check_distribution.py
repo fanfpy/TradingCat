@@ -55,6 +55,9 @@ def audit(path: Path) -> list[str]:
     if not any(name.endswith("/NOTICE") or "/licenses/NOTICE" in name
                for name in names):
         errors.append("does not contain NOTICE")
+    if path.suffix == ".whl" and not any(
+            name.endswith("shared/default_config.yaml") for name in names):
+        errors.append("does not contain shared/default_config.yaml")
 
     for name, data in contents:
         for rule, pattern in SECRET_RULES.items():

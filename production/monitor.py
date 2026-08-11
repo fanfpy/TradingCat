@@ -30,13 +30,15 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from shared import db as dbm
+from shared.config import get_config
 from shared.indicators import sma, atr22
 from shared.market_calendar import completed_bar_freshness, market_for_symbol
 from shared.strategy_evaluator import ATR_PERIOD, StrategyEvaluator
 
 # 盘中预警阈值（spec §3.1）
-PRE_ENTRY_ALERT = 0.005     # 距入场边界 0.5%
-STOP_ALERT = 0.01           # 距止损 1%
+_CONFIG = get_config()
+STOP_ALERT = _CONFIG.monitor.critical_distance_pct / 100.0
+PRE_ENTRY_ALERT = STOP_ALERT / 2.0
 
 
 def _market_for_symbol(symbol: str) -> str:
@@ -302,6 +304,40 @@ def post_market_check(conn, symbol: str, params: Dict, date: str,
     return report
 
 
+def post_market_to_outbox(conn, symbol: str, params: Dict, date: str, *,
+                          account_id: str = "default",
+                          realtime_position: Optional[Dict] = None,
+                          channels: Optional[List[str]] = None) -> Dict:
+    """运行盘后监控并把报告原子写入 notification outbox。"""
+    report = post_market_check(
+        conn, symbol, params, date, realtime_position=realtime_position)
+    if report.formal_entry:
+        kind = "ENTRY"
+    elif report.exit_triggered:
+        kind = "EXIT"
+    elif report.stop_changed:
+        kind = "STOP_CHANGED"
+    else:
+        kind = "NO_CHANGE"
+    latest = dbm.get_latest_strategy_version(conn, symbol)
+    strategy_version_id = int(latest["version_id"]) if latest else 0
+    payload = {
+        "symbol": symbol,
+        "kind": f"MONITOR_POST_{kind}",
+        "rationale": "; ".join(report.messages) or "盘后检查无状态变化",
+        "formal_entry": report.formal_entry,
+        "exit_triggered": report.exit_triggered,
+        "stop_changed": report.stop_changed,
+    }
+    persisted = dbm.record_signal_with_outbox(
+        conn, account_id=account_id, symbol=symbol,
+        strategy_version_id=strategy_version_id, bar_ts=date,
+        signal_type=f"MONITOR_POST_{kind}", payload=payload,
+        channels=channels,
+    )
+    return {"report": report, "signal": persisted}
+
+
 # ────────────────────────────────────────────────────────────────
 # 实时持仓（真相源：长桥 OpenAPI；portfolio 表不再维护）
 # ────────────────────────────────────────────────────────────────
@@ -414,7 +450,7 @@ def _position_out(position: Dict) -> Dict:
 def _selftest() -> int:
     """内存造数据的冒烟测试（--selftest 入口）。"""
     import math
-    conn = dbm.get_conn(":memory:")
+    conn = dbm.get_core_conn(":memory:")
 
     # 造 120 根数据
     rows = []
@@ -475,13 +511,15 @@ if __name__ == "__main__":
     p_pre = sub.add_parser("pre", help="盘前：入场区域/当前止损/保护单缺失")
     p_pre.add_argument("--symbol", default=None,
                        help="指定单标的（优先于 --scope）；缺省遍历组合")
-    p_pre.add_argument("--scope", choices=["portfolio", "watchlist"], default=None,
+    p_pre.add_argument("--scope", choices=["portfolio", "watchlist"],
+                       default=_CONFIG.monitor.scope,
                        help="portfolio=仅持仓检查；watchlist=仅自选买入信号检查；缺省=两者并集")
 
     p_intra = sub.add_parser("intra", help="盘中：实时价格临界预警")
     p_intra.add_argument("--symbol", default=None,
                          help="指定单标的（优先于 --scope）；缺省遍历组合")
-    p_intra.add_argument("--scope", choices=["portfolio", "watchlist"], default=None,
+    p_intra.add_argument("--scope", choices=["portfolio", "watchlist"],
+                         default=_CONFIG.monitor.scope,
                          help="portfolio=仅持仓检查；watchlist=仅自选买入信号检查；缺省=两者并集")
     p_intra.add_argument("--price", type=float, default=None,
                          help="手工覆盖实时价格；缺省使用长桥 SDK 批量实时报价")
@@ -489,7 +527,8 @@ if __name__ == "__main__":
     p_post = sub.add_parser("post", help="盘后：完成日线确认（入场/退出/止损变化）")
     p_post.add_argument("--symbol", default=None,
                         help="指定单标的（优先于 --scope）；缺省遍历组合")
-    p_post.add_argument("--scope", choices=["portfolio", "watchlist"], default=None,
+    p_post.add_argument("--scope", choices=["portfolio", "watchlist"],
+                        default=_CONFIG.monitor.scope,
                         help="portfolio=仅持仓检查；watchlist=仅自选买入信号检查；缺省=两者并集")
 
     args = parser.parse_args()
@@ -501,7 +540,7 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(0)
 
-    conn = dbm.get_conn()
+    conn = dbm.get_core_conn()
     date = datetime.now().strftime("%Y-%m-%d")
 
     def params_for(symbol: str) -> Dict:
@@ -656,11 +695,16 @@ if __name__ == "__main__":
 
     quote_map: Dict[str, Dict] = {}
     protective_symbols: Optional[List[str]] = None
+    realtime_errors = []
     if lb_client is not None and symbols and args.command in ("pre", "intra"):
         try:
             quote_map = {q["symbol"]: q for q in lb_client.quotes(symbols) if q.get("symbol")}
         except Exception as exc:
             print(f"[错误] 长桥实时行情快照失败: {exc}", file=sys.stderr)
+            realtime_errors.append({
+                "error_type": type(exc).__name__, "error_message": str(exc),
+                "retryable": bool(getattr(exc, "retryable", False)),
+            })
         try:
             protective_symbols = sorted({
                 order.get("symbol", "") for order in lb_client.stop_orders()
@@ -676,9 +720,11 @@ if __name__ == "__main__":
     ) for s in symbols]
     out = {
         "command": args.command, "date": date, "scope": scope_label,
-        "status": "ok",
+        "status": "SAFE_DEGRADE" if realtime_errors else "ok",
         "symbols_checked": len(symbols), "results": results,
     }
+    if realtime_errors:
+        out["realtime_errors"] = realtime_errors
     if lb_error:
         out["realtime_position_error"] = True
     # 通知是输出的旁路消费者，失败不改变监控/交易判定。

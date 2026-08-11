@@ -30,9 +30,89 @@
 import os
 import sys
 import json
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
+
+
+logger = logging.getLogger(__name__)
+
+
+class LongbridgeError(RuntimeError):
+    retryable = False
+
+    def failure(self, symbol: str) -> Dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "error_type": type(self).__name__,
+            "error_message": str(self),
+            "retryable": self.retryable,
+        }
+
+
+class AuthenticationError(LongbridgeError):
+    pass
+
+
+class PermissionDeniedError(LongbridgeError):
+    pass
+
+
+class RateLimitError(LongbridgeError):
+    retryable = True
+
+
+class NetworkError(LongbridgeError):
+    retryable = True
+
+
+class SymbolNotFoundError(LongbridgeError):
+    pass
+
+
+class DataIntegrityError(LongbridgeError):
+    pass
+
+
+def classify_longbridge_error(exc: Exception, operation: str,
+                              symbol: Optional[str] = None) -> LongbridgeError:
+    """把 SDK/HTTP 异常归一为稳定、可诊断的 Provider 错误。"""
+    if isinstance(exc, LongbridgeError):
+        return exc
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(token in text for token in (
+            "401", "unauthorized", "authentication", "credential", "token", "signature")):
+        error_type = AuthenticationError
+    elif any(token in text for token in ("403", "forbidden", "permission", "not entitled")):
+        error_type = PermissionDeniedError
+    elif any(token in text for token in ("429", "rate limit", "too many requests", "quota")):
+        error_type = RateLimitError
+    elif any(token in text for token in (
+            "invalid symbol", "symbol not found", "security not found", "unknown symbol")):
+        error_type = SymbolNotFoundError
+    elif any(token in text for token in (
+            "timeout", "timed out", "connection", "network", "dns", "socket",
+            "502", "503", "504", "unavailable")):
+        error_type = NetworkError
+    elif any(token in text for token in ("malformed", "decode", "invalid response")):
+        error_type = DataIntegrityError
+    else:
+        error_type = LongbridgeError
+    target = f" [{symbol}]" if symbol else ""
+    return error_type(f"Longbridge {operation}{target} failed: {exc}")
+
+
+def _provider_failure(exc: Exception, operation: str, symbol: Optional[str],
+                      strict: bool, fallback):
+    error = classify_longbridge_error(exc, operation, symbol)
+    logger.error(
+        "Longbridge request failed operation=%s symbol=%s error_type=%s retryable=%s message=%s",
+        operation, symbol or "-", type(error).__name__, error.retryable, error)
+    if strict:
+        raise error from exc
+    return fallback
+
 
 # ============ 环境自适应层 ============
 
@@ -279,7 +359,7 @@ class LongbridgeClient:
             (f"LONGBRIDGE_{label_prefix}ACCESS_TOKEN", self._access_token),
         ) if not value or value.startswith("your_")]
         if missing:
-            raise RuntimeError(
+            raise AuthenticationError(
                 "长桥 SDK API Key 凭证缺失或仍为示例值: " + ", ".join(missing) + "。\n"
                 "请在项目 .env 或进程环境中设置 App Key / App Secret / Legacy Access Token；"
                 "不要使用 longbridge CLI OAuth token。"
@@ -320,7 +400,7 @@ class LongbridgeClient:
 
     # ============ 行情 ============
     
-    def quote(self, symbol: str) -> Optional[dict]:
+    def quote(self, symbol: str, strict: bool = True) -> Optional[dict]:
         """获取单只标的实时行情
         
         参数:
@@ -330,25 +410,26 @@ class LongbridgeClient:
             行情 dict，含 symbol/name/current_price/volume/change_pct 等。失败返回 None。
         """
         try:
-            data = self._quote_ctx.quote([symbol])
+            data = self._require_quote_ctx().quote([symbol])
             if data and len(data) > 0:
-                return self._normalize_quote(data[0])
+                normalized = self._normalize_quote(data[0])
+                if not normalized["symbol"]:
+                    raise DataIntegrityError(f"Longbridge quote [{symbol}] malformed response")
+                return normalized
             return None
-        except Exception as e:
-            print(f"[错误] 查询 {symbol} 行情失败: {e}", file=sys.stderr)
-            return None
+        except Exception as exc:
+            return _provider_failure(exc, "quote", symbol, strict, None)
     
-    def quotes(self, symbols: List[str]) -> List[dict]:
+    def quotes(self, symbols: List[str], strict: bool = True) -> List[dict]:
         """获取多只标的实时行情
         
         直接调用 SDK QuoteContext.quote。
         """
         try:
-            data = self._quote_ctx.quote(symbols)
+            data = self._require_quote_ctx().quote(symbols)
             return [self._normalize_quote(q) for q in data] if data else []
-        except Exception as e:
-            print(f"[错误] 批量行情查询失败: {e}", file=sys.stderr)
-            return []
+        except Exception as exc:
+            return _provider_failure(exc, "quotes", ",".join(symbols), strict, [])
 
     def depth(self, symbol: str) -> dict:
         """获取盘口深度，返回 ``{symbol, asks, bids}``。"""
@@ -376,26 +457,32 @@ class LongbridgeClient:
         cp = float(q.last_done) if hasattr(q, 'last_done') and q.last_done else (
             float(q.prev_close) if hasattr(q, 'prev_close') else 0
         )
+        previous = float(q.prev_close) if hasattr(q, 'prev_close') else 0.0
+        raw_change = getattr(q, "change_value", None)
+        raw_rate = getattr(q, "change_rate", None)
+        change_value = float(raw_change) if raw_change is not None else cp - previous
+        change_pct = (float(raw_rate) if raw_rate is not None else
+                      (change_value / previous * 100.0 if previous else 0.0))
         return {
             "symbol": q.symbol if hasattr(q, 'symbol') else '',
             "name": q.name if hasattr(q, 'name') else '',
             "current_price": cp,
             "last": cp,  # 向后兼容：portfolio_analyzer等脚本用 q.get('last')
-            "prev_close": float(q.prev_close) if hasattr(q, 'prev_close') else 0,
+            "prev_close": previous,
             "high": float(q.high) if hasattr(q, 'high') else 0,
             "low": float(q.low) if hasattr(q, 'low') else 0,
             "open": float(q.open) if hasattr(q, 'open') else 0,
             "volume": int(q.volume) if hasattr(q, 'volume') else 0,
             "turnover": float(q.turnover) if hasattr(q, 'turnover') else 0,
-            "change_value": float(q.change_value) if hasattr(q, 'change_value') else 0,
-            "change_pct": float(q.change_rate) if hasattr(q, 'change_rate') else 0,
+            "change_value": change_value,
+            "change_pct": change_pct,
             "timestamp": str(q.timestamp) if hasattr(q, 'timestamp') else '',
         }
     
     # ============ 持仓 & 资产 ============
     
-    def positions(self, strict: bool = False) -> List[dict]:
-        """获取当前持仓列表；strict=True 时查询失败直接抛错供交易状态同步 fail closed。"""
+    def positions(self, strict: bool = True) -> List[dict]:
+        """获取当前持仓列表；默认 strict，查询失败不得伪装成空持仓。"""
         try:
             resp = self._trade_ctx.stock_positions()
             positions = []
@@ -435,19 +522,20 @@ class LongbridgeClient:
                         else:
                             p['last_price'] = '0'
                             p['unrealized_pnl_pct'] = '0'
-                except Exception as e:
-                    print(f"[警告] 获取行情失败: {e}", file=sys.stderr)
+                except Exception as exc:
+                    if strict:
+                        raise
+                    logger.warning(
+                        "position quote degrade error_type=%s message=%s",
+                        type(exc).__name__, exc)
                     for p in positions:
                         p['last_price'] = '0'
                         p['unrealized_pnl_pct'] = '0'
             return positions
-        except Exception as e:
-            print(f"[错误] 获取持仓失败: {e}", file=sys.stderr)
-            if strict:
-                raise
-            return []
+        except Exception as exc:
+            return _provider_failure(exc, "positions", None, strict, [])
     
-    def assets(self) -> Optional[dict]:
+    def assets(self, strict: bool = True) -> Optional[dict]:
         """获取账户资产概览 (对应 CLI: assets)"""
         try:
             resp = self._trade_ctx.account_balance()
@@ -460,9 +548,8 @@ class LongbridgeClient:
                     'currency': str(bal.currency) if hasattr(bal, 'currency') else 'HKD',
                 }
             return None
-        except Exception as e:
-            print(f"[错误] 获取资产失败: {e}", file=sys.stderr)
-            return None
+        except Exception as exc:
+            return _provider_failure(exc, "assets", None, strict, None)
     
     def exchange_rates(self) -> dict:
         """获取港元/美元汇率
@@ -508,13 +595,16 @@ class LongbridgeClient:
                     sentiment["regime"] = "警惕"
                 else:
                     sentiment["regime"] = "恐慌"
-        except Exception:
-            pass
+        except LongbridgeError as exc:
+            logger.warning(
+                "market sentiment compatibility fallback error_type=%s retryable=%s message=%s",
+                type(exc).__name__, exc.retryable, exc)
         return sentiment
     
     # ============ K线数据 ============
     
-    def kline(self, symbol: str, days: int = 30, period: str = "day") -> List[dict]:
+    def kline(self, symbol: str, days: int = 30, period: str = "day",
+              strict: bool = True) -> List[dict]:
         """获取历史K线数据 (对应 CLI: kline)"""
         try:
             from datetime import datetime, timedelta
@@ -529,7 +619,7 @@ class LongbridgeClient:
             }
             lb_period = period_map.get(period, Period.Day)
             
-            resp = self._quote_ctx.history_candlesticks_by_date(
+            resp = self._require_quote_ctx().history_candlesticks_by_date(
                 symbol=symbol, period=lb_period, adjust_type=AdjustType.NoAdjust,
                 start=start.date(), end=end.date()
             )
@@ -545,12 +635,11 @@ class LongbridgeClient:
                     'turnover': float(c.turnover) if hasattr(c, 'turnover') else 0,
                 })
             return klines[-days:] if len(klines) > days else klines
-        except Exception as e:
-            print(f"[错误] 获取 {symbol} K线失败: {e}", file=sys.stderr)
-            return []
+        except Exception as exc:
+            return _provider_failure(exc, "kline", symbol, strict, [])
     
     def kline_by_count(self, symbol: str, count: int = 260, period: str = "day",
-                       adjust: str = "forward") -> List[dict]:
+                       adjust: str = "forward", strict: bool = True) -> List[dict]:
         """获取最近 N 根 K线（技术指标计算专用）。
 
         adjust: "forward"（前复权，默认）/ "none"（未复权）。
@@ -573,7 +662,7 @@ class LongbridgeClient:
             if count > 1000:
                 return self._kline_by_sdk_years(symbol, count, lb_period, adj, period)
 
-            resp = self._quote_ctx.candlesticks(
+            resp = self._require_quote_ctx().candlesticks(
                 symbol=symbol, period=lb_period, count=count,
                 adjust_type=adj,
             )
@@ -587,9 +676,8 @@ class LongbridgeClient:
                 'volume': int(c.volume) if hasattr(c, 'volume') else 0,
                 'turnover': float(c.turnover) if hasattr(c, 'turnover') else 0,
             } for c in resp]
-        except Exception as e:
-            print(f"[错误] 获取 {symbol} K线失败: {e}", file=sys.stderr)
-            return []
+        except Exception as exc:
+            return _provider_failure(exc, "kline_by_count", symbol, strict, [])
 
     def _kline_by_sdk_years(self, symbol: str, count: int, lb_period,
                             adjust_type, period: str) -> List[dict]:
@@ -599,8 +687,8 @@ class LongbridgeClient:
 
         bars_per_year = {"day": 250, "week": 52, "month": 12}.get(period)
         if bars_per_year is None:
-            print("[错误] 超过 1000 根的 SDK 分段拉取只支持 day/week/month", file=sys.stderr)
-            return []
+            raise DataIntegrityError(
+                "超过 1000 根的 SDK 分段拉取只支持 day/week/month")
         years_needed = int(math.ceil(count / float(bars_per_year))) + 1
         now = datetime.now()
         start_year = now.year - years_needed + 1
@@ -617,9 +705,9 @@ class LongbridgeClient:
                     start=date(year, 1, 1),
                     end=date(year, 12, 31),
                 )
-            except Exception as e:
-                print(f"[错误] SDK 拉取 {symbol} {year} K线失败: {e}", file=sys.stderr)
-                continue
+            except Exception as exc:
+                raise classify_longbridge_error(
+                    exc, f"history_candlesticks:{year}", symbol) from exc
             for c in (resp or []):
                 timestamp = str(getattr(c, "timestamp", ""))
                 if not timestamp:
@@ -637,7 +725,8 @@ class LongbridgeClient:
         rows = [by_date[d] for d in sorted(by_date)]
         rows = rows[-count:] if len(rows) > count else rows
         if not rows:
-            print(f"[错误] SDK 未拉到 {symbol} 任何K线", file=sys.stderr)
+            logger.info("Longbridge no data operation=history_candlesticks symbol=%s",
+                        symbol)
         return rows
     
     def kline_for_indicators(self, symbol: str, is_leverage: bool = False) -> Optional[List[dict]]:
@@ -974,7 +1063,7 @@ class LongbridgeClient:
     
     # ============ 基本数据 ============
     
-    def static_info(self, symbol: str) -> Optional[dict]:
+    def static_info(self, symbol: str, strict: bool = True) -> Optional[dict]:
         """获取标的基本信息
         
         参数:
@@ -987,14 +1076,16 @@ class LongbridgeClient:
             response = self._require_quote_ctx().static_info([symbol])
             resp = response[0] if response else None
             if resp is not None:
-                return {
+                result = {
                     'symbol': getattr(resp, 'symbol', symbol),
                     'name': (getattr(resp, 'name_en', '') or
                              getattr(resp, 'name_cn', '') or
                              getattr(resp, 'name_hk', '')),
-                    'exchange': resp.exchange if hasattr(resp, 'exchange') else '',
-                    'currency': resp.currency if hasattr(resp, 'currency') else '',
+                    'exchange': str(resp.exchange) if hasattr(resp, 'exchange') else '',
+                    'currency': str(resp.currency) if hasattr(resp, 'currency') else '',
                     'lot_size': int(resp.lot_size) if hasattr(resp, 'lot_size') else 0,
+                    'board': str(getattr(resp, 'board', '') or ''),
+                    'asset_type': self._asset_type_from_static_info(resp),
                     'total_shares': int(resp.total_shares) if hasattr(resp, 'total_shares') else 0,
                     'circulating_shares': int(getattr(resp, 'circulating_shares', 0) or 0),
                     'eps': float(getattr(resp, 'eps', 0) or 0),
@@ -1005,10 +1096,25 @@ class LongbridgeClient:
                     'dividend_per_share': float(
                         getattr(resp, 'dividend_yield', 0) or 0),
                 }
+                required = ("symbol", "name", "exchange", "currency")
+                if any(not result[field] for field in required):
+                    raise DataIntegrityError(
+                        f"Longbridge static_info [{symbol}] malformed response: "
+                        f"missing {', '.join(field for field in required if not result[field])}")
+                return result
             return None
-        except Exception as e:
-            print(f"[错误] 获取 {symbol} 基本信息失败: {e}", file=sys.stderr)
-            return None
+        except Exception as exc:
+            return _provider_failure(exc, "static_info", symbol, strict, None)
+
+    @staticmethod
+    def _asset_type_from_static_info(response) -> str:
+        """只映射数据源明确表达为 equity 的 board。"""
+        board = str(getattr(response, "board", "") or "")
+        return "EQUITY" if board in {
+            "SecurityBoard.HKEquity",
+            "SecurityBoard.SHEquity",
+            "SecurityBoard.SZEquity",
+        } else "UNKNOWN"
 
     def trading_calendar(self, market: str, start, end) -> List[dict]:
         """读取官方 SDK 交易日历，返回范围内每天的开闭市标记。"""
@@ -1084,7 +1190,7 @@ class LongbridgeClient:
             print(f"[错误] 估算可买数量失败: {e}", file=sys.stderr)
             return None
     
-    def watchlist(self, strict: bool = False) -> List[str]:
+    def watchlist(self, strict: bool = True) -> List[str]:
         """获取自选股列表；strict=True 时 SDK 查询失败直接抛错。"""
         try:
             resp = self._quote_ctx.watchlist()
@@ -1093,11 +1199,8 @@ class LongbridgeClient:
                 for security in getattr(group, 'securities', []):
                     symbols.append(security.symbol)
             return symbols
-        except Exception as e:
-            print(f"[错误] 获取自选股失败: {e}", file=sys.stderr)
-            if strict:
-                raise
-            return []
+        except Exception as exc:
+            return _provider_failure(exc, "watchlist", None, strict, [])
 
 
     # ------------------------------------------------------------------
@@ -1176,8 +1279,10 @@ class LongbridgeClient:
             if quote and 'VIXY.US' in quote:
                 return float(quote['VIXY.US'].get('last', 0))
             return 17.0  # 默认值
-        except Exception:
-            return 17.0  # 失败时返回中性的VIX值
+        except Exception as exc:
+            logger.warning("VIX compatibility fallback error_type=%s message=%s",
+                           type(exc).__name__, exc)
+            return 17.0  # Legacy API 兼容层显式降级。
 
     # ------------------------------------------------------------------
     # 中文帮助系统

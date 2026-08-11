@@ -279,7 +279,7 @@ class OrderManager:
 # ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    conn = dbm.get_conn(":memory:")
+    conn = dbm.get_execution_conn(":memory:")
     svc = ConfirmationService(conn)
     adapter = ApprovalAdapter(conn, channel="cli")
     om = OrderManager(conn)

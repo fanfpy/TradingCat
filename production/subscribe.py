@@ -23,11 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from shared.config import get_config
+
 TS_ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_DIR = Path(os.environ.get("TRADINGCAT_RUNTIME_DIR", str(TS_ROOT))).expanduser()
-REPORTS_DIR = Path(os.environ.get(
-    "TRADINGCAT_REPORTS_DIR", str(RUNTIME_DIR / "reports"))).expanduser()
-WEBHOOK_ENV = "TRADINGCAT_WEBHOOK_URL"
+_CONFIG = get_config()
+REPORTS_DIR = Path(_CONFIG.report.directory)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ def run_subs(symbol: Optional[str] = None, conn=None) -> Dict:
 
 def _push_if_configured(summary: Dict) -> Optional[str]:
     """有 webhook 配置则 POST 摘要；返回推送目标或 None。"""
-    webhook = os.environ.get(WEBHOOK_ENV, "").strip()
+    webhook = get_config().integrations.webhook_url
     if not webhook:
         return None
     try:

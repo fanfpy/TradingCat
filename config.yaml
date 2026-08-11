@@ -6,9 +6,7 @@
 #   3. 运行前先加载环境变量（见 .env.example 与 docs/deploy.md）。
 # 校验：python3 -c "import yaml; yaml.safe_load(open('config.yaml'))"
 #
-# 说明：代码目前直接读取环境变量（shared/longbridge_client.py /
-#       production/subscribe.py / shared/db.py），本文件是部署时可机器
-#       解析的配置清单/文档；D-11 低耦合目标下后续 story 可接入统一读取。
+# 说明：非敏感运行参数由 shared.config.TradingCatConfig 统一加载。
 # =====================================================================
 
 # ── 长桥数据源（唯一行情/券商源）──────────────────────────────
@@ -28,9 +26,12 @@ market:
     primary: auto                       # SDK 0.2.74 无基本面接口；按能力探测并安全降级
     openalice_adapter_command: ${TRADINGCAT_OPENALICE_ADAPTER_COMMAND:-}
 
-  # v5 双 store：Core 与 executiond 必须使用不同路径/权限。
-  core_db_path: ${TRADING_CORE_DB:-${TRADING_DB:-}}
-  execution_db_path: ${TRADING_EXECUTION_DB:-}
+database:
+  core_path: shared/trading.db
+  execution_path: shared/execution.db
+
+quota:
+  longbridge_daily: 1000
 
 # ── 推送 ─────────────────────────────────────────────────────────────
 # 订阅报告 webhook；未设置则不推送，只落盘 reports/YYYY-MM-DD/
@@ -47,8 +48,11 @@ approval:
 # 日频报告模式（tc subscribe add/list/rm/run），对齐盘前/盘中/盘后工作流
 subscription:
   store: state_repository              # watchlist_item + monitoring_subscription
-  report_dir: reports/%Y-%m-%d         # 报告落盘目录（strftime 格式）
   push_daily: true                     # 默认开启每日推送
+
+report:
+  directory: reports
+  backup_directory: data/backups
 
 runtime:
   root: ${TRADINGCAT_RUNTIME_DIR:-}     # 安装部署时的可写运行目录
@@ -66,4 +70,5 @@ monitor:
 research:
   grid: full                           # full=1620 组 | small=9 组 | adx=1620 组+ADX 过滤
   min_bars: 630                        # 504 根开发区 + 至少 126 根 Final Holdout
+  prefilter_min_bars: 504
   longbridge_quant: optional_research_only # 不替代 Native 最终验证

@@ -105,27 +105,35 @@ def test_current_risk_check_uses_real_snapshot_and_fails_on_stale_account():
 
 
 def test_batch_reconciliation_restores_synced_or_sets_mismatch():
-    conn = dbm.get_conn(":memory:")
-    dbm.upsert_account(conn, "default", "SYNCED", cash=100_000,
+    core_conn = dbm.get_core_conn(":memory:")
+    execution_conn = dbm.get_execution_conn(":memory:")
+    dbm.upsert_account(core_conn, "default", "SYNCED", cash=100_000,
                        buying_power=50_000, nav=100_000)
-    plan = _submitted_plan(conn)
+    plan = _submitted_plan(execution_conn)
 
     class MatchingBroker:
         def order_state(self, broker_order_id):
             return {"status": "Submitted"}
 
-    ok = reconcile_runtime(conn, MatchingBroker())
+    ok = reconcile_runtime(core_conn, execution_conn, MatchingBroker())
     assert ok["ok"] and ok["plans_checked"] == 1
-    assert dbm.get_account(conn)["sync_status"] == "SYNCED"
+    assert dbm.get_account(core_conn)["sync_status"] == "SYNCED"
 
     class MissingBroker:
         def order_state(self, broker_order_id):
             return None
 
-    bad = reconcile_runtime(conn, MissingBroker(), plan_id=plan.plan_id)
+    bad = reconcile_runtime(
+        core_conn, execution_conn, MissingBroker(), plan_id=plan.plan_id)
     assert not bad["ok"]
-    assert dbm.get_account(conn)["sync_status"] == "MISMATCH"
-    assert dbm.list_intents(conn, plan.plan_id)[0]["status"] == "UNKNOWN"
+    assert dbm.get_account(core_conn)["sync_status"] == "MISMATCH"
+    assert dbm.list_intents(execution_conn, plan.plan_id)[0]["status"] == "UNKNOWN"
+
+
+def test_reconciliation_rejects_same_store():
+    conn = dbm.get_core_conn(":memory:")
+    with pytest.raises(RuntimeError, match="物理隔离"):
+        reconcile_runtime(conn, conn, object())
 
 
 def test_operational_cli_functions_are_machine_readable(capsys):
@@ -140,14 +148,17 @@ def test_operational_cli_functions_are_machine_readable(capsys):
     assert cmd_strategy(strategy_args, _conn=conn) == 0
     assert '"symbol": "A.US"' in capsys.readouterr().out
 
-    _submitted_plan(conn, plan_id="p_cli_ops")
+    execution_conn = dbm.get_execution_conn(":memory:")
+    _submitted_plan(execution_conn, plan_id="p_cli_ops")
     execution_args = argparse.Namespace(cmd="reconcile", plan_id="p_cli_ops")
 
     class MatchingBroker:
         def order_state(self, broker_order_id):
             return {"status": "Submitted"}
 
-    assert cmd_execution(execution_args, _conn=conn, _broker=MatchingBroker()) == 0
+    assert cmd_execution(
+        execution_args, _conn=execution_conn, _core_conn=conn,
+        _broker=MatchingBroker()) == 0
     assert '"ok": true' in capsys.readouterr().out
 
 

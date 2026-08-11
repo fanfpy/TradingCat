@@ -256,7 +256,7 @@ def apply_portfolio_decision(conn, equity: float, plans: List[PositionPlan],
 # ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    conn = dbm.get_conn(":memory:")
+    conn = dbm.get_core_conn(":memory:")
 
     # 造两段 252+ 根数据
     import math

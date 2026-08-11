@@ -5,14 +5,12 @@ import uuid
 from datetime import datetime
 from typing import Dict, Optional
 
-from production.decision import (
-    _positions, load_execution_plan, run_decision, target_to_execution_plan,
-)
 from production.monitor import post_market_check
-from production.position import KellyPositionSizer
 from research.factors import analyze_factor_snapshot
 from shared import db as dbm
 from shared.indicators import atr22
+from shared.longbridge_client import LongbridgeError
+from shared.security import SecurityResolver, UNKNOWN_METADATA
 
 
 SCHEMA_VERSION = "tradingcat.v1"
@@ -52,11 +50,13 @@ DEFAULT_SECURITY_RISK = {
 class TradingCatApplication:
     """可被 CLI、Python、MCP/HTTP 或任意 Agent 调用的唯一用例层。"""
 
-    def __init__(self, core_conn, execution_conn=None, fundamental_provider=None):
+    def __init__(self, core_conn, execution_conn=None, fundamental_provider=None,
+                 security_provider=None):
         self.core = core_conn
         self.execution = execution_conn
         self.fundamental_provider = fundamental_provider
         self._seed_security_master()
+        self.security_resolver = SecurityResolver(self.core, security_provider)
 
     def _seed_security_master(self) -> None:
         if self.core.execute("SELECT 1 FROM security_master LIMIT 1").fetchone():
@@ -67,12 +67,22 @@ class TradingCatApplication:
                 **DEFAULT_SECURITY_RISK.get(symbol, {}))
 
     def resolve_security(self, query: str) -> Dict:
-        matches = dbm.search_security(self.core, query)
-        if not matches and "." in query:
-            symbol = query.upper()
-            exchange = symbol.rsplit(".", 1)[-1]
-            dbm.upsert_security(self.core, symbol, symbol, exchange, "USD", [query])
-            matches = dbm.search_security(self.core, symbol)
+        try:
+            resolution = self.security_resolver.resolve(query)
+        except LongbridgeError as exc:
+            return _envelope(
+                "ResolveSecurity",
+                error={"code": type(exc).__name__, "message": str(exc),
+                       "retryable": exc.retryable},
+            )
+        matches = resolution["matches"]
+        if resolution["status"] == UNKNOWN_METADATA:
+            return _envelope(
+                "ResolveSecurity",
+                error={"code": UNKNOWN_METADATA,
+                       "message": "无法从 security_master 或 Longbridge 确认标的 metadata"},
+                data={"symbol": resolution["symbol"], "candidates": []},
+            )
         exact = [m for m in matches if m["confidence"] >= 0.9]
         if len(exact) == 1:
             return _envelope("ResolveSecurity", data=exact[0])
@@ -155,6 +165,9 @@ class TradingCatApplication:
 
     def review_portfolio(self, *, account_id: str = "default",
                          as_of: Optional[str] = None, account_state=None) -> Dict:
+        from production.decision import _positions
+        from production.position import KellyPositionSizer
+
         date = as_of or datetime.now().strftime("%Y-%m-%d")
         positions = _positions(account_state, self.core)
         policy_row = dbm.get_active_investor_policy(self.core, account_id)
@@ -252,6 +265,8 @@ class TradingCatApplication:
     def propose_trade(self, equity: float, *, account_id: str = "default",
                       mode: str = "DRY_RUN", as_of: Optional[str] = None,
                       account_state=None) -> Dict:
+        from production.decision import run_decision, target_to_execution_plan
+
         target = run_decision(self.core, equity, account_state, as_of)
         plan = target_to_execution_plan(
             self.core, target, equity, account_id, mode, account_state)
@@ -285,6 +300,8 @@ class TradingCatApplication:
                         "confirmation_id": confirmation.confirmation_id})
 
     def explain_decision(self, plan_id: str) -> Dict:
+        from production.decision import load_execution_plan
+
         plan = load_execution_plan(self.core, plan_id)
         if plan is None:
             return _envelope(

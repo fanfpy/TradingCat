@@ -20,7 +20,6 @@ spec §2.1-2.10 的编排层。
 import argparse
 import hashlib
 import json
-import os
 import re
 import sys
 from datetime import date, datetime, timezone
@@ -32,8 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared import db as dbm
 from shared.backtest import PARAM_GRID, PARAM_GRID_ADX, run_backtest
-from shared.market_calendar import completed_bar_freshness
+from shared.market_calendar import completed_bar_freshness, market_for_symbol
 from shared.cost_model import estimate_cost
+from shared.config import get_config
 from research.walk_forward import aggregate_oos_trades, run_walk_forward, trade_statistics
 from research.score import decide_lifecycle
 from research.robustness import (
@@ -44,8 +44,9 @@ from research.robustness import (
 )
 
 # 预筛参数（spec §2.1）
-MIN_BARS = 504
-MIN_RESEARCH_BARS = 630  # 504 根开发区 + 至少 126 根不可见 Final Holdout
+_CONFIG = get_config()
+MIN_BARS = _CONFIG.research.prefilter_min_bars
+MIN_RESEARCH_BARS = _CONFIG.research.min_bars
 MIN_MEDIAN_DOLLAR_VOLUME = 10_000_000
 MAX_STALENESS_DAYS = 5  # 允许的数据新鲜度（日历日，可配置）
 FINAL_HOLDOUT_FRAC = 0.10
@@ -79,29 +80,26 @@ def list_candidates(conn) -> List[str]:
 # ────────────────────────────────────────────────────────────────
 
 def _reserve_longbridge(conn, scope: str, amount: int = 1) -> None:
-    limit = int(os.environ.get("TRADINGCAT_LONGBRIDGE_DAILY_QUOTA", "1000"))
+    from shared.longbridge_client import RateLimitError
+    limit = _CONFIG.quota.longbridge_daily
     reservation = dbm.reserve_api_quota(
         conn, f"longbridge:{scope}", amount=amount, quota_limit=limit)
     if not reservation["allowed"]:
-        raise RuntimeError(
+        raise RateLimitError(
             f"Longbridge API quota exceeded: {scope} "
             f"{reservation['used']}/{reservation['limit']}")
 
 
 def fetch_longbridge_watchlist(client=None, conn=None) -> List[str]:
     """通过长桥 Python SDK 拉取全部分组的自选标的并保序去重。"""
-    try:
-        if conn is not None:
-            _reserve_longbridge(conn, "watchlist")
-        if client is None:
-            from shared.longbridge_client import LongbridgeClient
-            client = LongbridgeClient(scope="quote")
-        symbols = client.watchlist(strict=True)
-        seen = set()
-        return [s for s in symbols if not (s in seen or seen.add(s))]
-    except Exception as e:
-        print(f"[警告] 长桥 SDK 拉取自选失败: {e}", file=sys.stderr)
-        return []
+    if conn is not None:
+        _reserve_longbridge(conn, "watchlist")
+    if client is None:
+        from shared.longbridge_client import LongbridgeClient
+        client = LongbridgeClient(scope="quote")
+    symbols = client.watchlist(strict=True)
+    seen = set()
+    return [s for s in symbols if not (s in seen or seen.add(s))]
 
 
 def sync_watchlist(conn) -> Dict:
@@ -114,9 +112,18 @@ def sync_watchlist(conn) -> Dict:
       4. 系统有、长桥已移除      → 不自动删除（系统池是验证状态，非长桥镜像）
     返回差异报告 {added, skipped_removed, existing_active, not_in_lb, groups}.
     """
-    lb_symbols = fetch_longbridge_watchlist(conn=conn)
+    try:
+        lb_symbols = fetch_longbridge_watchlist(conn=conn)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "retryable": bool(getattr(exc, "retryable", False)),
+        }
     if not lb_symbols:
-        return {"error": "longbridge_watchlist_empty", "note": "长桥自选为空或 SDK 查询失败，未同步"}
+        return {"ok": True, "status": "NO_DATA", "added": [],
+                "note": "长桥自选为空，未同步"}
 
     snapshot_id = dbm.snapshot_universe(
         conn, "watchlist", lb_symbols, as_of_date=dbm._now(),
@@ -185,8 +192,8 @@ def _removed_reason(row) -> str:
             return ",".join(sorted(reasons))
         if ev.get("passed_folds", 0) < 3:
             return f"passed_folds={ev.get('passed_folds')}/4"
-    except Exception:
-        pass
+    except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+        return "unknown"
     return "unknown"
 
 
@@ -361,6 +368,21 @@ def _manifest_complete(manifest) -> bool:
         return False
 
 
+def _sync_market_calendar(conn, client, symbol: str, last_completed: str) -> int:
+    """同步 freshness gate 所需的最近交易日历。"""
+    from datetime import timedelta
+
+    market = market_for_symbol(symbol)
+    start = date.fromisoformat(last_completed) - timedelta(days=10)
+    end = datetime.now(timezone.utc).date()
+    _reserve_longbridge(conn, "calendar")
+    rows = client.trading_calendar(market, start, end)
+    count = dbm.upsert_calendar(conn, market, rows, source="longbridge")
+    dbm.audit(conn, "DATAHUB_CALENDAR", entity_type="market", entity_id=market,
+              payload={"start": str(start), "end": str(end), "rows": count})
+    return count
+
+
 def incremental_update(conn, symbol: str, manifest, count: int = 60) -> Dict:
     """增量缓存（架构 P1 DataHub）：manifest 完整时只拉最近 N 根并追加新 bar。
 
@@ -369,13 +391,11 @@ def incremental_update(conn, symbol: str, manifest, count: int = 60) -> Dict:
     - 有新 bar → upsert 追加 + 更新 manifest（date_end/bar_count/sha256/last_completed）
     """
     last_ts = manifest["last_completed"]
-    try:
-        _reserve_longbridge(conn, "kline")
-        from shared.longbridge_client import LongbridgeClient
-        client = LongbridgeClient(scope="quote")
-        klines = client.kline_by_count(symbol, count=count, period="day")
-    except Exception as e:
-        raise RuntimeError(f"长桥拉取 {symbol} K线失败（凭证/网络/SDK）: {e}") from e
+    _reserve_longbridge(conn, "kline")
+    from shared.longbridge_client import LongbridgeClient
+    client = LongbridgeClient(scope="quote")
+    klines = client.kline_by_count(symbol, count=count, period="day")
+    _sync_market_calendar(conn, client, symbol, last_ts)
     if not klines:
         return {
             "symbol": symbol,
@@ -432,28 +452,12 @@ def cache_symbol(conn, symbol: str, count: int = 800) -> Dict:
     manifest = dbm.get_manifest(conn, symbol)
     if _manifest_complete(manifest):
         # 缓存完整 → 增量更新（P1 DataHub：只拉新 bar，不全量重拉）
-        try:
-            return incremental_update(conn, symbol, manifest, count=60)
-        except RuntimeError as e:
-            # 增量拉取失败 → 返回现有缓存（不阻塞，幂等），stderr 报错
-            print(f"[warn] 增量更新 {symbol} 失败，使用现有缓存: {e}", file=sys.stderr)
-            return {
-                "symbol": symbol,
-                "bar_count": manifest["bar_count"],
-                "date_start": manifest["date_start"],
-                "date_end": manifest["date_end"],
-                "sha256": manifest["sha256"],
-                "source": manifest["source"],
-                "cached": True,
-            }
+        return incremental_update(conn, symbol, manifest, count=60)
 
-    try:
-        _reserve_longbridge(conn, "kline")
-        from shared.longbridge_client import LongbridgeClient
-        client = LongbridgeClient(scope="quote")
-        klines = client.kline_by_count(symbol, count=count, period="day")
-    except Exception as e:
-        raise RuntimeError(f"长桥拉取 {symbol} K线失败（凭证/网络/SDK）: {e}") from e
+    _reserve_longbridge(conn, "kline")
+    from shared.longbridge_client import LongbridgeClient
+    client = LongbridgeClient(scope="quote")
+    klines = client.kline_by_count(symbol, count=count, period="day")
 
     if not klines:
         raise RuntimeError(f"长桥返回 {symbol} 0 根K线（行情权限或网络问题）")
@@ -462,6 +466,8 @@ def cache_symbol(conn, symbol: str, count: int = 800) -> Dict:
     if len(rows) < MIN_RESEARCH_BARS:
         raise RuntimeError(
             f"{symbol} 日线不足研究所需 {MIN_RESEARCH_BARS} 根（实际 {len(rows)}），未写入缓存")
+
+    _sync_market_calendar(conn, client, symbol, rows[-1]["ts"])
 
     sha = _rows_sha256(rows)
     cache_bars(conn, symbol, rows, source="longbridge",
@@ -870,6 +876,23 @@ def research_symbol(conn, symbol: str, grid: Optional[List[Dict]] = None) -> Dic
             "holdout_id": holdout_id}
 
 
+def research_candidate(conn, symbol: str,
+                       grid: Optional[List[Dict]] = None) -> Dict:
+    """研究主链入口；prefilter 未通过时禁止进入回测与 Holdout。"""
+    bars = [dict(row) for row in dbm.get_bars(conn, symbol)]
+    check = prefilter(conn, symbol, bars)
+    if not check["passed"]:
+        return {
+            "symbol": symbol,
+            "error": "prefilter failed",
+            "error_type": "PrefilterFailed",
+            "error_message": ", ".join(check["reasons"]),
+            "retryable": "stale_completed_bar" in check["reasons"],
+            "prefilter": check,
+        }
+    return research_symbol(conn, symbol, grid=grid)
+
+
 # ────────────────────────────────────────────────────────────────
 # CLI
 # ────────────────────────────────────────────────────────────────
@@ -894,11 +917,12 @@ def main():
 
     p_res = sub.add_parser("research", help="跑完整研究流水线")
     p_res.add_argument("symbol")
-    p_res.add_argument("--grid", choices=["full", "small", "adx"], default="full",
+    p_res.add_argument("--grid", choices=["full", "small", "adx"],
+                       default=_CONFIG.research.grid,
                        help="full=1620组原网格; small=9组快速; adx=1620组+ADX>20过滤")
 
     args = parser.parse_args()
-    conn = dbm.get_conn()
+    conn = dbm.get_core_conn()
 
     if args.cmd == "add":
         print(add_candidate(conn, args.symbol))
@@ -924,7 +948,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.cmd == "research":
         grid = None if args.grid == "full" else (_small_grid() if args.grid == "small" else PARAM_GRID_ADX)
-        result = research_symbol(conn, args.symbol, grid=grid)
+        result = research_candidate(conn, args.symbol, grid=grid)
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

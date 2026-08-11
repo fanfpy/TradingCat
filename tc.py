@@ -108,13 +108,13 @@ def cmd_watchlist(args) -> int:
     if args.cmd == "sync":
         from research.pipeline import sync_watchlist
         from shared import db as dbm
-        conn = dbm.get_conn()
+        conn = dbm.get_core_conn()
         report = sync_watchlist(conn)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     elif args.cmd == "list":
         from shared import db as dbm
-        conn = dbm.get_conn()
+        conn = dbm.get_core_conn()
         rows = dbm.list_lifecycle(conn, args.status)
         print(json.dumps([dict(r) for r in rows], ensure_ascii=False, indent=2))
         return 0
@@ -124,22 +124,44 @@ def cmd_watchlist(args) -> int:
 
 def cmd_research(args) -> int:
     """研究流水线：薄封装 pipeline.py。"""
-    if args.cmd == "add":
-        return run_python("research/pipeline.py", ["add", args.symbol])
-    elif args.cmd == "run":
-        return run_python("research/pipeline.py", ["research", args.symbol, "--grid", args.grid])
-    elif args.cmd == "cache":
-        return run_python("research/pipeline.py", ["cache", args.symbol])
-    elif args.cmd == "prefilter":
-        return run_python("research/pipeline.py", ["prefilter", args.symbol])
-    elif args.cmd == "quant-preview":
+    if args.cmd == "quant-preview":
         if not args.capability and not args.script_file:
             print("[错误] quant-preview 需要 --script-file，或使用 --capability 只检查能力",
                   file=sys.stderr)
             return 2
         return cmd_quant_preview(args)
-    print(f"[错误] 未知 research 子命令: {args.cmd}", file=sys.stderr)
-    return 1
+    from research import pipeline
+    from shared import db as dbm
+    from shared.backtest import PARAM_GRID_ADX
+
+    conn = dbm.get_core_conn()
+    try:
+        if args.cmd == "add":
+            result = {"message": pipeline.add_candidate(conn, args.symbol)}
+        elif args.cmd == "run":
+            grid = (None if args.grid == "full" else
+                    pipeline._small_grid() if args.grid == "small" else PARAM_GRID_ADX)
+            result = pipeline.research_candidate(conn, args.symbol, grid=grid)
+        elif args.cmd == "cache":
+            result = pipeline.cache_symbol(conn, args.symbol)
+        elif args.cmd == "prefilter":
+            bars = dbm.get_bars(conn, args.symbol)
+            if not bars:
+                result = {"error_type": "NoData", "error_message":
+                          f"{args.symbol} 无缓存数据，先执行 cache"}
+            else:
+                result = pipeline.prefilter(
+                    conn, args.symbol, [dict(bar) for bar in bars])
+        else:
+            print(f"[错误] 未知 research 子命令: {args.cmd}", file=sys.stderr)
+            return 1
+    except Exception as exc:
+        result = {"error_type": type(exc).__name__, "error_message": str(exc),
+                  "retryable": bool(getattr(exc, "retryable", False))}
+        print(json.dumps(result, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if result.get("error") or result.get("error_type") else 0
 
 
 def cmd_monitor(args) -> int:
@@ -162,7 +184,7 @@ def cmd_risk(args) -> int:
     """组合风控：对真实账户快照和本地持仓执行只读检查。"""
     from production.operations import check_current_portfolio
     from shared import db as dbm
-    result = check_current_portfolio(dbm.get_conn())
+    result = check_current_portfolio(dbm.get_core_conn())
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["passed"] else 1
 
@@ -174,7 +196,7 @@ def cmd_account(args, _conn=None, _client=None) -> int:
     from shared import db as dbm
     from shared.account import ensure_synced, sync_positions
 
-    conn = _conn or dbm.get_conn()
+    conn = _conn or dbm.get_core_conn()
     if args.cmd == "show":
         result = asdict(ensure_synced(conn, args.account_id))
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -188,15 +210,18 @@ def cmd_account(args, _conn=None, _client=None) -> int:
     return 0 if result["ok"] else 1
 
 
-def cmd_execution(args, _conn=None, _broker=None) -> int:
+def cmd_execution(args, _conn=None, _broker=None, _core_conn=None) -> int:
     """订单生命周期运维：只读查询券商并与本地订单对账。"""
     from execution.broker_live import LiveBroker
     from production.operations import reconcile_runtime
     from shared import db as dbm
 
-    conn = _conn or dbm.get_conn()
-    broker = _broker or LiveBroker(conn, enable_live=True)
-    result = reconcile_runtime(conn, broker, plan_id=args.plan_id)
+    core_conn = _core_conn or (_conn if _conn is not None else dbm.get_core_conn())
+    execution_conn = _conn or dbm.get_execution_conn()
+    broker = _broker or LiveBroker(
+        execution_conn, enable_live=False, enable_order_queries=True)
+    result = reconcile_runtime(
+        core_conn, execution_conn, broker, plan_id=args.plan_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 1
 
@@ -204,7 +229,7 @@ def cmd_execution(args, _conn=None, _broker=None) -> int:
 def cmd_strategy(args, _conn=None) -> int:
     """查询 StrategyVersion 快照。"""
     from shared import db as dbm
-    conn = _conn or dbm.get_conn()
+    conn = _conn or dbm.get_core_conn()
     rows = dbm.list_strategy_versions(
         conn, symbol=args.symbol, limit=args.limit, newest_first=True)
     print(json.dumps([dict(row) for row in rows], ensure_ascii=False, indent=2))
@@ -226,7 +251,7 @@ def cmd_portfolio(args) -> int:
     from shared import db as dbm
     from shared.account import ensure_synced
 
-    conn = dbm.get_conn()
+    conn = dbm.get_core_conn()
     state = ensure_synced(conn)
     equity = args.equity or state.nav or state.cash
     if equity is None or equity <= 0:

@@ -146,6 +146,19 @@ def test_dry_run_constructor_default(conn, approved_plan):
     assert ack.status == "DRY_RUN_SUBMITTED"
 
 
+def test_readonly_order_queries_do_not_enable_live_submission(conn, approved_plan):
+    plan, approved = approved_plan
+    fake = FakeBrokerClient()
+    broker = LiveBroker(
+        conn, client=fake, enable_live=False, enable_order_queries=True)
+
+    assert broker.order_state("broker-1")["status"] == "Filled"
+    assert broker.enable_live is False
+    ack = broker.submit(make_intent_dict(plan), confirmation=approved, plan=plan)
+    assert ack.status == "DRY_RUN_SUBMITTED"
+    assert fake.calls == []
+
+
 # ────────────────────────────────────────────────────────────────
 # 2. LIVE：OrderManager → LiveBroker 全流程
 # ────────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ from production.target_portfolio import TargetPortfolio, build_target_portfolio
 from shared import db as dbm
 from shared.indicators import atr22
 from shared.cost_model import estimate_cost
+from shared.security import require_security_metadata
 
 
 ELIGIBLE_LIFECYCLE = ("verified", "live")
@@ -83,6 +84,12 @@ def collect_signals(conn, account_state=None, as_of_date: Optional[str] = None,
 
         if not (eligible_entry and report.formal_entry):
             continue
+        try:
+            require_security_metadata(conn, symbol)
+        except ValueError as exc:
+            dbm.audit(conn, "SIGNAL_SKIPPED", "symbol", symbol,
+                      {"reason": "unknown_security_metadata", "error": str(exc)})
+            continue
         manifest = dbm.get_manifest(conn, symbol)
         if (manifest is None
                 or manifest["adjustment_mode"] not in ("FORWARD", "TEST")
@@ -135,7 +142,7 @@ def _existing_plans(conn, equity: float, account_state=None) -> List[PositionPla
             price = float(bars[-1]["close"])
         if not symbol or qty <= 0 or price <= 0 or equity <= 0:
             continue
-        security = dbm.get_security(conn, symbol)
+        security = require_security_metadata(conn, symbol)
         dollar = sorted(float(row["close"]) * float(row["volume"])
                         for row in bars[-60:] if row["close"] and row["volume"])
         plans.append(PositionPlan(
@@ -144,11 +151,9 @@ def _existing_plans(conn, equity: float, account_state=None) -> List[PositionPla
             entry_price=float(position.get("cost_price", 0) or
                               position.get("entry_price", 0) or price),
             is_proposed=False,
-            sector=security["sector"] if security is not None else "UNKNOWN",
-            currency=security["currency"] if security is not None else "UNKNOWN",
-            asset_type=security["asset_type"] if security is not None else "EQUITY",
-            beta=float(security["beta"]) if security is not None else 1.0,
-            leverage=float(security["leverage"]) if security is not None else 1.0,
+            sector=security["sector"], currency=security["currency"],
+            asset_type=security["asset_type"], beta=float(security["beta"]),
+            leverage=float(security["leverage"]),
             median_dollar_volume=dollar[len(dollar) // 2] if dollar else None,
         ))
     return plans

@@ -16,7 +16,6 @@
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,12 +27,10 @@ if _TRADING_ROOT not in sys.path:
     sys.path.insert(0, _TRADING_ROOT)
 
 from shared import db as dbm
+from shared.config import get_config
 
 # 可迁移运行目录；缺省保持仓库内旧路径，安装部署可用环境变量覆盖。
-DATA_BACKUPS = Path(os.environ.get(
-    "TRADINGCAT_BACKUP_DIR",
-    str(Path(__file__).resolve().parents[1] / "data" / "backups"),
-)).expanduser()
+DATA_BACKUPS = Path(get_config().report.backup_directory)
 DAILY_KEEP = 7    # 每日快照保留份数
 WEEKLY_KEEP = 8   # 每周归档保留份数
 

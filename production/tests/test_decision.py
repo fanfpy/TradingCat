@@ -24,6 +24,8 @@ def _bars(n=120):
 
 def _ready_conn(with_oos=True):
     conn = dbm.get_conn(":memory:")
+    dbm.upsert_security(
+        conn, "A.US", "A", "NASDAQ", "USD", asset_type="EQUITY")
     rows = _bars()
     dbm.upsert_bars(conn, "A.US", rows, "test")
     dbm.set_manifest(conn, "A.US", {

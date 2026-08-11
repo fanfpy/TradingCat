@@ -5,7 +5,6 @@
 """
 
 import json
-import os
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -89,9 +88,10 @@ class CompositeNotificationAdapter:
 def configured_notifier(conn) -> NotificationAdapter:
     """创建生产 notifier；审计日志始终保留。"""
     from shared.env import load_selected
+    from shared.config import get_config
     load_selected(("TRADINGCAT_NOTIFICATION_WEBHOOK",))
     audit = AuditNotificationAdapter(conn)
-    webhook = os.environ.get("TRADINGCAT_NOTIFICATION_WEBHOOK", "").strip()
+    webhook = get_config().integrations.notification_webhook
     if not webhook:
         return audit
     return CompositeNotificationAdapter(audit, WebhookNotificationAdapter(webhook))

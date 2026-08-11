@@ -10,6 +10,7 @@ from shared import db as dbm
 from shared.data_providers import (
     FundamentalProviderChain, OpenAliceCommandProvider,
 )
+from shared.security import LazyLongbridgeSecurityProvider
 
 
 OPERATIONS = {
@@ -38,7 +39,8 @@ def main(argv=None) -> int:
         if openalice is not None:
             providers.append(openalice)
         app = TradingCatApplication(
-            core, execution, fundamental_provider=FundamentalProviderChain(providers))
+            core, execution, fundamental_provider=FundamentalProviderChain(providers),
+            security_provider=LazyLongbridgeSecurityProvider())
         result = getattr(app, OPERATIONS[args.operation])(**payload)
     except Exception as exc:
         result = {

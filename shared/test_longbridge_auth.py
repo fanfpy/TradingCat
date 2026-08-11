@@ -213,3 +213,59 @@ def test_sdk_diagnostics_supports_credential_free_offline_validation(
     assert offline["passed"] is True
     assert credential_check["credentials_required"] is True
     assert credential_check["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("message", "error_type", "retryable"),
+    [
+        ("401 unauthorized token", lb.AuthenticationError, False),
+        ("connection timed out", lb.NetworkError, True),
+    ],
+)
+def test_quote_failures_are_not_disguised_as_empty_data(
+        message, error_type, retryable):
+    client = object.__new__(lb.LongbridgeClient)
+
+    class FailingQuoteContext:
+        def quote(self, symbols):
+            raise RuntimeError(message)
+
+    client._quote_ctx = FailingQuoteContext()
+
+    with pytest.raises(error_type) as caught:
+        client.quote("0700.HK")
+    assert caught.value.retryable is retryable
+
+
+def test_explicit_ui_degrade_can_return_empty_quote():
+    client = object.__new__(lb.LongbridgeClient)
+
+    class FailingQuoteContext:
+        def quote(self, symbols):
+            raise TimeoutError("network timeout")
+
+    client._quote_ctx = FailingQuoteContext()
+    assert client.quote("0700.HK", strict=False) is None
+
+
+def test_segmented_kline_failure_never_returns_partial_history():
+    client = object.__new__(lb.LongbridgeClient)
+
+    class FailingQuoteContext:
+        def history_candlesticks_by_date(self, **kwargs):
+            raise TimeoutError("network timeout")
+
+    client._quote_ctx = FailingQuoteContext()
+    with pytest.raises(lb.NetworkError):
+        client._kline_by_sdk_years("AAPL.US", 1500, object(), object(), "day")
+
+
+def test_quote_derives_change_when_sdk_fields_are_absent():
+    quote = type("Quote", (), {
+        "symbol": "AAPL.US", "last_done": 98, "prev_close": 100,
+        "name": "", "high": 101, "low": 97, "open": 100,
+        "volume": 1, "turnover": 98, "timestamp": "now",
+    })()
+    normalized = object.__new__(lb.LongbridgeClient)._normalize_quote(quote)
+    assert normalized["change_value"] == -2
+    assert normalized["change_pct"] == -2

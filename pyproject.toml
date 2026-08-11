@@ -42,5 +42,8 @@ include-package-data = true
 where = ["."]
 include = ["application*", "execution*", "production*", "research*", "shared*"]
 
+[tool.setuptools.package-data]
+shared = ["default_config.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["application", "execution/tests", "production/tests", "research", "shared"]

@@ -28,7 +28,8 @@ from execution.broker import BrokerEventHandler, Reconciliation
 
 
 def main() -> int:
-    conn = dbm.get_conn(":memory:")
+    core_conn = dbm.get_core_conn(":memory:")
+    conn = dbm.get_execution_conn(":memory:")
     dbm.upsert_account(conn, "default", "SYNCED", cash=100_000.0, buying_power=80_000.0)
     account = AccountState(account_id="default", sync_status="SYNCED",
                            cash=100_000.0, buying_power=80_000.0)
@@ -78,7 +79,7 @@ def main() -> int:
     print(f"    full fill: status={dbm.get_intent(conn, intent['intent_id'])['status']}")
 
     # 7. Reconciliation：终态 FILLED 无需对账 → ok
-    rec = Reconciliation(conn)
+    rec = Reconciliation(core_conn, conn, None)
     r = rec.reconcile_plan(plan.plan_id)
     assert r["ok"], f"reconcile 应 ok: {r['mismatches']}"
     print(f"[7] Reconciliation ok")

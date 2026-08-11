@@ -12,7 +12,6 @@ look-ahead bias，而不是评价供应商的数据质量。
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import subprocess
 from dataclasses import asdict, dataclass
@@ -134,9 +133,10 @@ class OpenAliceCommandProvider:
 
     @classmethod
     def from_env(cls) -> Optional["OpenAliceCommandProvider"]:
+        from shared.config import get_config
         from shared.env import load_selected
         load_selected(["TRADINGCAT_OPENALICE_ADAPTER_COMMAND"])
-        raw = os.environ.get("TRADINGCAT_OPENALICE_ADAPTER_COMMAND", "").strip()
+        raw = get_config().integrations.openalice_adapter_command
         return cls(shlex.split(raw)) if raw else None
 
     def current_snapshot(self, symbol: str) -> FundamentalSnapshot:

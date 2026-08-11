@@ -403,7 +403,7 @@ def build_report(all_stats: dict, group_stats: dict, sample_info: dict,
 # ────────────────────────────────────────────────────────────────
 
 def run_analysis() -> dict:
-    conn = dbm.get_conn()
+    conn = dbm.get_core_conn()
     bars = load_all_bars(conn)
     conn.close()
 

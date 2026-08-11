@@ -65,20 +65,22 @@ def check_current_portfolio(conn, account_state=None,
     return result
 
 
-def reconcile_runtime(conn, broker, plan_id: Optional[str] = None) -> Dict:
+def reconcile_runtime(core_conn, execution_conn, broker,
+                      plan_id: Optional[str] = None) -> Dict:
     """对账一个或全部活跃计划；查询失败或不一致时保持 fail closed。"""
-    previous = dbm.get_account(conn, "default")
+    dbm.assert_separate_stores(core_conn, execution_conn)
+    previous = dbm.get_account(core_conn, "default")
     previous_status = previous["sync_status"] if previous is not None else "UNKNOWN"
-    dbm.set_account_sync_status(conn, "default", "RECONCILING")
+    dbm.set_account_sync_status(core_conn, "default", "RECONCILING")
     poll_result = None
     if hasattr(broker, "poll_active_orders"):
         poll_result = broker.poll_active_orders(plan_id)
-    reconciler = Reconciliation(conn, broker=broker)
+    reconciler = Reconciliation(core_conn, execution_conn, broker=broker)
     result = (reconciler.reconcile_plan(plan_id) if plan_id
               else reconciler.reconcile_all())
-    current = dbm.get_account(conn, "default")
+    current = dbm.get_account(core_conn, "default")
     if result["ok"] and current is not None and current["sync_status"] == "RECONCILING":
-        dbm.set_account_sync_status(conn, "default", previous_status)
+        dbm.set_account_sync_status(core_conn, "default", previous_status)
     if poll_result is not None:
         result["poll"] = poll_result
     return result

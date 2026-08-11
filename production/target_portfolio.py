@@ -21,19 +21,18 @@ from typing import Dict, List, Optional
 from production.position import PositionIntent
 from production.portfolio_risk import PositionPlan, PortfolioCheck, apply_portfolio_decision
 from shared import db as dbm
+from shared.security import require_security_metadata
 
 
 def _risk_metadata(conn, symbol: str) -> Dict:
-    security = dbm.get_security(conn, symbol)
+    security = require_security_metadata(conn, symbol)
     bars = dbm.get_bars(conn, symbol)
     dollar = sorted(float(row["close"]) * float(row["volume"])
                     for row in bars[-60:] if row["close"] and row["volume"])
     return {
-        "sector": security["sector"] if security is not None else "UNKNOWN",
-        "currency": security["currency"] if security is not None else "UNKNOWN",
-        "asset_type": security["asset_type"] if security is not None else "EQUITY",
-        "beta": float(security["beta"]) if security is not None else 1.0,
-        "leverage": float(security["leverage"]) if security is not None else 1.0,
+        "sector": security["sector"], "currency": security["currency"],
+        "asset_type": security["asset_type"], "beta": float(security["beta"]),
+        "leverage": float(security["leverage"]),
         "median_dollar_volume": dollar[len(dollar) // 2] if dollar else None,
     }
 
@@ -132,7 +131,7 @@ if __name__ == "__main__":
     from shared import db as dbm
     from production.position import KellyPositionSizer
 
-    conn = dbm.get_conn(":memory:")
+    conn = dbm.get_core_conn(":memory:")
 
     # 造两标的 252+ 根日线（高相关 → 组合审查会限制对敞口）
     import math

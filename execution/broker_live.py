@@ -89,12 +89,14 @@ class LiveBroker:
     """
 
     def __init__(self, conn, client=None, enable_live: bool = False,
-                 account_id: str = "default", event_handler=None):
+                 account_id: str = "default", event_handler=None,
+                 enable_order_queries: bool = False):
         self.conn = conn
         self.client = client                    # 测试注入 mock；None → 懒加载真实客户端
         self.enable_live = bool(enable_live)    # 默认 False = DRY_RUN（铁律）
+        self.enable_order_queries = bool(enable_order_queries)
         self.account_id = account_id
-        if event_handler is None and self.enable_live:
+        if event_handler is None and (self.enable_live or self.enable_order_queries):
             from execution.broker import BrokerEventHandler
             event_handler = BrokerEventHandler(conn)
         self.event_handler = event_handler
@@ -388,10 +390,11 @@ class LiveBroker:
     def order_state(self, broker_order_id: str) -> Optional[Dict]:
         """Reconciliation 兼容接口：按券商订单号查状态。
 
-        - DRY_RUN：返回模拟存在（本地演练单视为"存在"）
+        - DRY_RUN 且未启用只读查询：返回模拟存在（本地演练单视为"存在"）
+        - 只读查询：调券商查询，但 submit 仍保持 DRY_RUN
         - LIVE：调券商查询；查不到 → None（触发 Reconciliation fail closed）
         """
-        if not self.enable_live:
+        if not self.enable_live and not self.enable_order_queries:
             return {"broker_order_id": broker_order_id, "status": "SUBMITTED"}
         try:
             client = self._get_client()
@@ -448,7 +451,7 @@ if __name__ == "__main__":
     from execution.models import ExecutionPlan, PlanOrder, Confirmation, now_utc
     from execution.order_manager import ConfirmationService, ApprovalAdapter, OrderManager
 
-    conn = dbm.get_conn(":memory:")
+    conn = dbm.get_execution_conn(":memory:")
 
     class _FakeClient:
         """不触网的 mock 券商。"""

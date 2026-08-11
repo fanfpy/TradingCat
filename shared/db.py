@@ -35,15 +35,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from shared.config import get_config
+
 # v5 将业务核心状态与执行状态拆成两个物理 store。TRADING_DB 继续作为
 # TRADING_CORE_DB 的兼容别名，避免已有部署在升级时突然换库。
-CORE_DB_PATH = os.environ.get(
-    "TRADING_CORE_DB",
-    os.environ.get("TRADING_DB", str(Path(__file__).parent / "trading.db")),
-)
-EXECUTION_DB_PATH = os.environ.get(
-    "TRADING_EXECUTION_DB", str(Path(__file__).parent / "execution.db")
-)
+_CONFIG = get_config()
+CORE_DB_PATH = _CONFIG.database.core_path
+EXECUTION_DB_PATH = _CONFIG.database.execution_path
 DB_PATH = CORE_DB_PATH
 
 SCHEMA = """
@@ -460,6 +458,7 @@ CREATE TABLE IF NOT EXISTS security_master (
     asset_type   TEXT NOT NULL DEFAULT 'EQUITY',
     beta         REAL NOT NULL DEFAULT 1.0,
     leverage     REAL NOT NULL DEFAULT 1.0,
+    lot_size     INTEGER,
     aliases_json TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'ACTIVE',
     updated_at   TEXT NOT NULL
@@ -546,6 +545,8 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE security_master ADD COLUMN beta REAL NOT NULL DEFAULT 1.0")
     if not _has_column(conn, "security_master", "leverage"):
         conn.execute("ALTER TABLE security_master ADD COLUMN leverage REAL NOT NULL DEFAULT 1.0")
+    if not _has_column(conn, "security_master", "lot_size"):
+        conn.execute("ALTER TABLE security_master ADD COLUMN lot_size INTEGER")
     conn.execute(
         "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, _now()),
@@ -1324,17 +1325,18 @@ def upsert_security(conn: sqlite3.Connection, symbol: str, name: str,
                     exchange: str, currency: str,
                     aliases: Optional[List[str]] = None, *, sector: str = "UNKNOWN",
                     asset_type: str = "EQUITY", beta: float = 1.0,
-                    leverage: float = 1.0) -> None:
+                    leverage: float = 1.0, lot_size: Optional[int] = None) -> None:
     conn.execute(
         "INSERT INTO security_master(symbol,name,exchange,currency,sector,asset_type,beta,"
-        "leverage,aliases_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+        "leverage,lot_size,aliases_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name,"
         "exchange=excluded.exchange,currency=excluded.currency,"
         "sector=excluded.sector,asset_type=excluded.asset_type,beta=excluded.beta,"
-        "leverage=excluded.leverage,"
+        "leverage=excluded.leverage,lot_size=excluded.lot_size,"
         "aliases_json=excluded.aliases_json,updated_at=excluded.updated_at",
         (symbol.upper(), name, exchange.upper(), currency.upper(), sector.upper(),
          asset_type.upper(), float(beta), float(leverage),
+         int(lot_size) if lot_size is not None else None,
          json.dumps(sorted(set(aliases or [])), ensure_ascii=False), _now()),
     )
     conn.commit()
