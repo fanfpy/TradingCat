@@ -81,7 +81,8 @@ def _is_fresh(updated_at: Optional[str], max_age_seconds: int = FRESHNESS_SECOND
     return 0 <= age <= max_age_seconds
 
 
-def sync_account(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID) -> AccountState:
+def sync_account(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
+                 security_service=None) -> AccountState:
     """从券商（长桥）同步账户资产 → 写入 StateRepository。
 
     - 成功 → SYNCED（含 cash/buying_power）
@@ -105,6 +106,13 @@ def sync_account(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID) -> Acc
         buying_power = first_present("buying_power", "net_buying_power", "max_finance_amount")
         nav = first_present("net_assets", "nav", "equity")
         positions = _broker_collection(client, "positions") if hasattr(client, "positions") else []
+        if security_service is not None:
+            metadata_results = security_service.ensure_batch(
+                position.get("symbol", "") for position in positions)
+            failures = [item for item in metadata_results if not item["ok"]]
+            if failures:
+                dbm.audit(conn, "SECURITY_METADATA_FAILED", "account", account_id,
+                          {"failures": failures})
         open_orders = _broker_collection(client, "orders") if hasattr(client, "orders") else []
         state = AccountState(
             account_id=account_id,
@@ -147,7 +155,8 @@ def ensure_synced(conn, account_id: str = DEFAULT_ACCOUNT_ID,
     return state
 
 
-def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID) -> dict:
+def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
+                   security_service=None) -> dict:
     """从券商同步持仓快照 → 写入 audit。
 
     架构 v4.0 PositionSync（§5 半成品补全）：
@@ -160,10 +169,24 @@ def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID) -> d
         {synced: bool, positions: [...], mismatch: bool, details: str}
     """
     try:
+        owns_client = client is None
         if client is None:
             from shared.longbridge_client import LongbridgeClient
             client = LongbridgeClient(scope="trade")
+        if security_service is None and owns_client:
+            from shared.security import (
+                LazyLongbridgeSecurityProvider, SecurityService,
+            )
+            security_service = SecurityService(
+                conn, LazyLongbridgeSecurityProvider())
         broker_positions = _broker_collection(client, "positions") or []
+        metadata_results = (security_service.ensure_batch(
+            position.get("symbol", "") for position in broker_positions)
+            if security_service is not None else [])
+        metadata_failures = [item for item in metadata_results if not item["ok"]]
+        if metadata_failures:
+            dbm.audit(conn, "SECURITY_METADATA_FAILED", "account", account_id,
+                      {"failures": metadata_failures})
         # 长桥返回格式：[{symbol, quantity, cost_price, current_price, ...}]
 
         # 获取本地 portfolio 表持仓
@@ -194,7 +217,9 @@ def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID) -> d
                            "broker_count": len(broker_positions),
                            "local_count": len(local_positions)})
         return {"synced": ok, "positions": broker_map, "mismatch": not ok,
-                "details": "; ".join(mismatches) if mismatches else "ok"}
+            "details": "; ".join(mismatches) if mismatches else "ok",
+            "metadata": metadata_results,
+            "metadata_failures": metadata_failures}
     except Exception as e:
         old = dbm.get_account(conn, account_id)
         degraded = "UNKNOWN"
@@ -205,7 +230,8 @@ def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID) -> d
                   payload={"ok": False, "error": str(e)[:500],
                            "sync_status": degraded})
         return {"synced": False, "positions": {}, "mismatch": False,
-                "details": f"sync failed: {str(e)[:200]}"}
+            "details": f"sync failed: {str(e)[:200]}",
+            "metadata": [], "metadata_failures": []}
 
 
 if __name__ == "__main__":

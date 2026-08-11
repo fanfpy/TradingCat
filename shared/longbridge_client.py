@@ -1108,13 +1108,57 @@ class LongbridgeClient:
 
     @staticmethod
     def _asset_type_from_static_info(response) -> str:
-        """只映射数据源明确表达为 equity 的 board。"""
+        """基于 SDK static_info 明确信息保守映射资产类型。"""
+        explicit = str(
+            getattr(response, "instrument_type", "")
+            or getattr(response, "security_type", "")
+            or getattr(response, "asset_type", "")
+            or ""
+        ).split(".")[-1].upper().replace(" ", "_")
+        explicit_types = {
+            "STOCK": "EQUITY", "COMMON_STOCK": "EQUITY", "EQUITY": "EQUITY",
+            "ETF": "ETF", "REIT": "REIT", "WARRANT": "WARRANT",
+            "OPTION": "OPTION", "LEVERAGED_ETF": "LEVERAGED_ETF",
+        }
+        if explicit in explicit_types:
+            return explicit_types[explicit]
+
         board = str(getattr(response, "board", "") or "")
-        return "EQUITY" if board in {
+        if board in {"SecurityBoard.USOption", "SecurityBoard.USOptionS"}:
+            return "OPTION"
+        if board == "SecurityBoard.HKWarrant":
+            return "WARRANT"
+        if board in {
             "SecurityBoard.HKEquity",
-            "SecurityBoard.SHEquity",
-            "SecurityBoard.SZEquity",
-        } else "UNKNOWN"
+            "SecurityBoard.SHMainConnect", "SecurityBoard.SHMainNonConnect",
+            "SecurityBoard.SHSTAR", "SecurityBoard.SZMainConnect",
+            "SecurityBoard.SZMainNonConnect", "SecurityBoard.SZGEMConnect",
+            "SecurityBoard.SZGEMNonConnect",
+        }:
+            return "EQUITY"
+        if board != "SecurityBoard.USMain":
+            return "UNKNOWN"
+
+        name = " ".join(str(getattr(response, field, "") or "")
+                        for field in ("name_en", "name_cn", "name_hk")).casefold()
+        non_company_markers = (
+            " etf", "fund", "trust", "reit", "realty", "properties",
+            "property", "ultrapro", "ultra ", " 2x", " 3x", "bull 2",
+            "bull 3", "bear 2", "bear 3", "inverse",
+        )
+        if any(marker in name for marker in non_company_markers):
+            return "UNKNOWN"
+
+        total = int(getattr(response, "total_shares", 0) or 0)
+        circulating = int(getattr(response, "circulating_shares", 0) or 0)
+        financials = (
+            float(getattr(response, "eps", 0) or 0),
+            float(getattr(response, "eps_ttm", 0) or 0),
+            float(getattr(response, "bps", 0) or 0),
+        )
+        has_company_financials = any(abs(value) > 1e-12 for value in financials)
+        return ("EQUITY" if total > circulating > 0 and has_company_financials
+                else "UNKNOWN")
 
     def trading_calendar(self, market: str, start, end) -> List[dict]:
         """读取官方 SDK 交易日历，返回范围内每天的开闭市标记。"""

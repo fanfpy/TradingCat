@@ -7,12 +7,22 @@ from execution.broker import Reconciliation
 from production.portfolio_risk import PositionPlan, check_portfolio
 from shared import db as dbm
 from shared.account import ensure_synced, sync_account, sync_positions
+from shared.security import require_security_metadata
 
 
-def sync_runtime_state(conn, client=None, account_id: str = "default") -> Dict:
+def sync_runtime_state(conn, client=None, account_id: str = "default",
+                       security_service=None) -> Dict:
     """同步资产和持仓并返回最终账户状态；任一不确定均 fail closed。"""
-    account = sync_account(conn, client=client, account_id=account_id)
-    positions = sync_positions(conn, client=client, account_id=account_id)
+    if security_service is None and client is None:
+        from shared.security import LazyLongbridgeSecurityProvider, SecurityService
+        security_service = SecurityService(
+            conn, LazyLongbridgeSecurityProvider())
+    account = sync_account(
+        conn, client=client, account_id=account_id,
+        security_service=security_service)
+    positions = sync_positions(
+        conn, client=client, account_id=account_id,
+        security_service=security_service)
     final = ensure_synced(conn, account_id)
     result = {
         "ok": account.synced and positions["synced"] and final.synced,
@@ -44,12 +54,21 @@ def check_current_portfolio(conn, account_state=None,
             if price <= 0:
                 failures.append(f"market_price_unknown:{row['symbol']}")
                 continue
+            try:
+                metadata = require_security_metadata(conn, row["symbol"])
+            except ValueError:
+                failures.append(f"unknown_security_metadata:{row['symbol']}")
+                continue
             plans.append(PositionPlan(
                 symbol=row["symbol"],
                 target_frac=float(row["quantity"]) * price / float(equity),
                 stop_price=float(row["stop_price"]),
                 entry_price=float(row["entry_price"]),
                 is_proposed=False,
+                sector=metadata["sector"], currency=metadata["currency"],
+                asset_type=metadata["asset_type"],
+                beta=float(metadata["beta"]),
+                leverage=float(metadata["leverage"]),
             ))
 
     if failures:

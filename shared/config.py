@@ -1,6 +1,7 @@
 """Typed runtime configuration loaded from config.yaml."""
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -27,8 +28,8 @@ class MonitorConfig:
 
 @dataclass(frozen=True)
 class DatabaseConfig:
-    core_path: str = str(PROJECT_ROOT / "shared" / "trading.db")
-    execution_path: str = str(PROJECT_ROOT / "shared" / "execution.db")
+    core_path: str
+    execution_path: str
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,8 @@ class QuotaConfig:
 
 @dataclass(frozen=True)
 class ReportConfig:
-    directory: str = str(PROJECT_ROOT / "reports")
-    backup_directory: str = str(PROJECT_ROOT / "data" / "backups")
+    directory: str
+    backup_directory: str
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,16 @@ def _absolute(value: str, base: Path) -> str:
     return str(path if path.is_absolute() else (base / path).resolve())
 
 
+def _writable_runtime_fallback(env: Mapping[str, str]) -> Path:
+    if sys.platform == "win32":
+        base = Path(env.get("LOCALAPPDATA") or env.get("APPDATA") or Path.home())
+        return base / "TradingCat"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TradingCat"
+    base = Path(env.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    return base / "tradingcat"
+
+
 def load_config(path: Optional[str] = None,
                 environ: Optional[Mapping[str, str]] = None) -> TradingCatConfig:
     env = os.environ if environ is None else environ
@@ -74,6 +85,7 @@ def load_config(path: Optional[str] = None,
     selected = selected.expanduser().resolve()
     raw = yaml.safe_load(selected.read_text(encoding="utf-8")) or {}
     base = selected.parent
+    is_bundled = selected == BUNDLED_CONFIG.resolve()
 
     research_raw = raw.get("research", {})
     monitor_raw = raw.get("monitor", {})
@@ -88,19 +100,33 @@ def load_config(path: Optional[str] = None,
     if scope not in ("portfolio", "watchlist"):
         raise ValueError("monitor.scope 必须是 portfolio/watchlist")
 
-    core_path = (env.get("TRADING_CORE_DB") or env.get("TRADING_DB")
-                 or database_raw.get("core_path", "shared/trading.db"))
-    execution_path = (env.get("TRADING_EXECUTION_DB")
-                      or database_raw.get("execution_path", "shared/execution.db"))
-    runtime_root = env.get("TRADINGCAT_RUNTIME_DIR")
-    report_dir = (env.get("TRADINGCAT_REPORTS_DIR")
-                  or report_raw.get("directory", "reports"))
-    backup_dir = (env.get("TRADINGCAT_BACKUP_DIR")
-                  or report_raw.get("backup_directory", "data/backups"))
-    if runtime_root:
-        runtime = Path(runtime_root).expanduser()
-        report_dir = env.get("TRADINGCAT_REPORTS_DIR", str(runtime / "reports"))
-        backup_dir = env.get("TRADINGCAT_BACKUP_DIR", str(runtime / "backups"))
+    runtime = Path(env["TRADINGCAT_RUNTIME_DIR"]).expanduser().resolve() \
+        if env.get("TRADINGCAT_RUNTIME_DIR") else _writable_runtime_fallback(env)
+    project_core = None if is_bundled else database_raw.get("core_path")
+    project_execution = None if is_bundled else database_raw.get("execution_path")
+    project_reports = None if is_bundled else report_raw.get("directory")
+    project_backups = None if is_bundled else report_raw.get("backup_directory")
+
+    core_path = env.get("TRADING_CORE_DB") or env.get("TRADING_DB")
+    execution_path = env.get("TRADING_EXECUTION_DB")
+    core_path = (_absolute(str(core_path), Path.cwd()) if core_path else
+                 _absolute(str(project_core), base) if project_core else
+                 str(runtime / "trading.db"))
+    execution_path = (_absolute(str(execution_path), Path.cwd()) if execution_path else
+                      _absolute(str(project_execution), base) if project_execution else
+                      str(runtime / "execution.db"))
+    if os.path.normcase(os.path.realpath(core_path)) == os.path.normcase(
+            os.path.realpath(execution_path)):
+        raise ValueError("database core_path 与 execution_path 必须不同")
+
+    report_dir = env.get("TRADINGCAT_REPORTS_DIR")
+    backup_dir = env.get("TRADINGCAT_BACKUP_DIR")
+    report_dir = (_absolute(str(report_dir), Path.cwd()) if report_dir else
+                  _absolute(str(project_reports), base) if project_reports else
+                  str(runtime / "reports"))
+    backup_dir = (_absolute(str(backup_dir), Path.cwd()) if backup_dir else
+                  _absolute(str(project_backups), base) if project_backups else
+                  str(runtime / "backups"))
 
     return TradingCatConfig(
         research=ResearchConfig(
@@ -114,14 +140,14 @@ def load_config(path: Optional[str] = None,
                 monitor_raw.get("critical_distance_pct", 1.0)),
         ),
         database=DatabaseConfig(
-            core_path=_absolute(str(core_path), base),
-            execution_path=_absolute(str(execution_path), base),
+            core_path=core_path,
+            execution_path=execution_path,
         ),
         quota=QuotaConfig(
             longbridge_daily=int(quota_raw.get("longbridge_daily", 1000))),
         report=ReportConfig(
-            directory=_absolute(str(report_dir), base),
-            backup_directory=_absolute(str(backup_dir), base),
+            directory=report_dir,
+            backup_directory=backup_dir,
         ),
         integrations=IntegrationConfig(
             webhook_url=env.get("TRADINGCAT_WEBHOOK_URL", "").strip(),

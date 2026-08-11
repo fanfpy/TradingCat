@@ -1,6 +1,6 @@
-"""Security metadata resolution without inferred trading attributes."""
+"""Security metadata hydration and resolution without inferred attributes."""
 
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 from shared import db as dbm
 
@@ -25,18 +25,96 @@ class LazyLongbridgeSecurityProvider:
         return self._client.static_info(symbol)
 
 
+class SecurityService:
+    """Cache-first metadata hydration; provider data is persisted only after validation."""
+
+    def __init__(self, core_conn, provider=None):
+        self.core = core_conn
+        self.provider = provider
+
+    @staticmethod
+    def _validate(symbol: str, metadata) -> Dict:
+        if metadata is None:
+            raise UnknownSecurityMetadataError(f"UNKNOWN_METADATA: {symbol}")
+        normalized = dict(metadata)
+        normalized["symbol"] = str(normalized.get("symbol", "")).upper()
+        expected = symbol.strip().upper()
+        if normalized["symbol"] != expected:
+            raise UnknownSecurityMetadataError(
+                f"UNKNOWN_METADATA: {expected} provider symbol mismatch")
+        required = ("symbol", "name", "exchange", "currency", "asset_type")
+        unknown = [field for field in required
+                   if not normalized.get(field)
+                   or str(normalized[field]).upper() == "UNKNOWN"]
+        if unknown:
+            raise UnknownSecurityMetadataError(
+                f"UNKNOWN_METADATA: {expected} missing {','.join(unknown)}")
+        lot_size = normalized.get("lot_size")
+        if lot_size not in (None, "", 0) and int(lot_size) <= 0:
+            raise UnknownSecurityMetadataError(
+                f"UNKNOWN_METADATA: {expected} invalid lot_size")
+        return normalized
+
+    def cached(self, symbol: str) -> Optional[Dict]:
+        row = dbm.get_security(self.core, symbol)
+        if row is None:
+            return None
+        try:
+            return self._validate(symbol, row)
+        except UnknownSecurityMetadataError:
+            return None
+
+    def ensure_metadata(self, symbol: str) -> Dict:
+        symbol = symbol.strip().upper()
+        cached = self.cached(symbol)
+        if cached is not None:
+            return {**cached, "metadata_source": "security_master"}
+        if self.provider is None:
+            raise UnknownSecurityMetadataError(f"UNKNOWN_METADATA: {symbol}")
+
+        metadata = self._validate(symbol, self.provider.static_info(symbol))
+        dbm.upsert_security(
+            self.core, metadata["symbol"], metadata["name"],
+            metadata["exchange"], metadata["currency"], aliases=[symbol],
+            sector=metadata.get("sector", "UNKNOWN"),
+            asset_type=metadata["asset_type"],
+            beta=float(metadata.get("beta", 1.0)),
+            leverage=float(metadata.get("leverage", 1.0)),
+            lot_size=metadata.get("lot_size"),
+        )
+        stored = self.cached(symbol)
+        if stored is None:
+            raise UnknownSecurityMetadataError(
+                f"UNKNOWN_METADATA: {symbol} persisted metadata incomplete")
+        return {**stored, "metadata_source": "provider"}
+
+    def ensure_batch(self, symbols: Iterable[str]) -> list[Dict]:
+        results = []
+        seen = set()
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol).strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            try:
+                metadata = self.ensure_metadata(symbol)
+                results.append({"symbol": symbol, "ok": True,
+                                "metadata": metadata})
+            except Exception as exc:
+                results.append({
+                    "symbol": symbol,
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                })
+        return results
+
+
 def require_security_metadata(conn, symbol: str) -> Dict:
-    row = dbm.get_security(conn, symbol)
-    if row is None:
+    metadata = SecurityService(conn).cached(symbol)
+    if metadata is None:
         raise UnknownSecurityMetadataError(f"UNKNOWN_METADATA: {symbol}")
-    metadata = dict(row)
-    required = ("symbol", "name", "exchange", "currency", "asset_type")
-    unknown = [field for field in required
-               if not metadata.get(field)
-               or str(metadata[field]).upper() == "UNKNOWN"]
-    if unknown:
-        raise UnknownSecurityMetadataError(
-            f"UNKNOWN_METADATA: {symbol} missing {','.join(unknown)}")
     return metadata
 
 
@@ -44,38 +122,26 @@ class SecurityResolver:
     def __init__(self, core_conn, provider=None):
         self.core = core_conn
         self.provider = provider
+        self.service = SecurityService(core_conn, provider)
 
     def resolve(self, query: str) -> Dict:
-        matches = dbm.search_security(self.core, query)
+        matches = [match for match in dbm.search_security(self.core, query)
+                   if self.service.cached(match["symbol"]) is not None]
         if matches:
-            return {"status": "RESOLVED", "matches": matches, "source": "security_master"}
+            return {"status": "RESOLVED", "matches": matches,
+                    "source": "security_master"}
 
         symbol = query.strip().upper()
-        if "." not in symbol or self.provider is None:
+        if "." not in symbol:
             return {"status": UNKNOWN_METADATA, "symbol": symbol, "matches": []}
-
-        metadata = self.provider.static_info(symbol)
-        if metadata is None:
-            return {"status": UNKNOWN_METADATA, "symbol": symbol, "matches": []}
-        required = ("symbol", "name", "exchange", "currency", "asset_type")
-        missing = [field for field in required if not metadata.get(field)]
-        if missing or str(metadata.get("asset_type", "")).upper() == "UNKNOWN":
+        try:
+            metadata = self.service.ensure_metadata(symbol)
+        except UnknownSecurityMetadataError as exc:
             return {
                 "status": UNKNOWN_METADATA,
                 "symbol": symbol,
                 "matches": [],
-                "missing": missing or ["asset_type"],
+                "error_message": str(exc),
             }
-
-        dbm.upsert_security(
-            self.core,
-            metadata["symbol"],
-            metadata["name"],
-            metadata["exchange"],
-            metadata["currency"],
-            aliases=[query],
-            asset_type=metadata["asset_type"],
-            lot_size=metadata.get("lot_size"),
-        )
         matches = dbm.search_security(self.core, metadata["symbol"])
         return {"status": "RESOLVED", "matches": matches, "source": "longbridge"}

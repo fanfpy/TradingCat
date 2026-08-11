@@ -133,11 +133,14 @@ def cmd_research(args) -> int:
     from research import pipeline
     from shared import db as dbm
     from shared.backtest import PARAM_GRID_ADX
+    from shared.security import LazyLongbridgeSecurityProvider, SecurityService
 
     conn = dbm.get_core_conn()
     try:
         if args.cmd == "add":
-            result = {"message": pipeline.add_candidate(conn, args.symbol)}
+            service = SecurityService(conn, LazyLongbridgeSecurityProvider())
+            result = {"message": pipeline.add_candidate(
+                conn, args.symbol, security_service=service)}
         elif args.cmd == "run":
             grid = (None if args.grid == "full" else
                     pipeline._small_grid() if args.grid == "small" else PARAM_GRID_ADX)

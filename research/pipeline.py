@@ -62,9 +62,14 @@ MANIFEST_FIELDS = ("source", "fetched_at", "last_completed",
 # 候选池
 # ────────────────────────────────────────────────────────────────
 
-def add_candidate(conn, symbol: str) -> str:
+def add_candidate(conn, symbol: str, security_service=None) -> str:
     """加入候选池（candidate 状态）。"""
     existing = dbm.get_lifecycle(conn, symbol)
+    if security_service is not None:
+        result = security_service.ensure_batch([symbol])[0]
+        if not result["ok"]:
+            dbm.audit(conn, "SECURITY_METADATA_FAILED", "symbol", symbol,
+                      result)
     if existing is None:
         dbm.set_lifecycle(conn, symbol, "candidate")
         return f"已加入候选池: {symbol}"
@@ -102,7 +107,7 @@ def fetch_longbridge_watchlist(client=None, conn=None) -> List[str]:
     return [s for s in symbols if not (s in seen or seen.add(s))]
 
 
-def sync_watchlist(conn) -> Dict:
+def sync_watchlist(conn, client=None) -> Dict:
     """同步：长桥自选 → 系统候选池。
 
     规则（docs/architecture.md 的关注、策略资格和授权分离原则）：
@@ -113,7 +118,10 @@ def sync_watchlist(conn) -> Dict:
     返回差异报告 {added, skipped_removed, existing_active, not_in_lb, groups}.
     """
     try:
-        lb_symbols = fetch_longbridge_watchlist(conn=conn)
+        if client is None:
+            from shared.longbridge_client import LongbridgeClient
+            client = LongbridgeClient(scope="quote")
+        lb_symbols = fetch_longbridge_watchlist(client=client, conn=conn)
     except Exception as exc:
         return {
             "ok": False,
@@ -140,6 +148,10 @@ def sync_watchlist(conn) -> Dict:
     not_in_lb = []        # 系统有但长桥已移除（不删除，仅报告）
     skipped_other = []    # 其他状态（backtesting/candidate），保持
 
+    from shared.security import SecurityService
+    metadata_results = SecurityService(conn, client).ensure_batch(
+        symbol for symbol in lb_symbols if symbol not in sys_set)
+
     for s in lb_symbols:
         if s not in sys_set:
             dbm.set_lifecycle(conn, s, "candidate")
@@ -164,6 +176,7 @@ def sync_watchlist(conn) -> Dict:
         removed_reasons[s] = _removed_reason(all_rows[s])
 
     return {
+        "ok": True,
         "lb_total": len(lb_symbols),
         "sys_total": len(sys_set),
         "added_candidate": sorted(added),
@@ -173,6 +186,7 @@ def sync_watchlist(conn) -> Dict:
         "skipped_removed_reasons": removed_reasons,
         "not_in_lb_kept": sorted(not_in_lb),
         "universe_snapshot_id": snapshot_id,
+        "metadata": metadata_results,
         "note": "added 已进候选池；removed 不重跑（见 reasons）；系统池不因长桥移除而删除",
     }
 
@@ -383,7 +397,8 @@ def _sync_market_calendar(conn, client, symbol: str, last_completed: str) -> int
     return count
 
 
-def incremental_update(conn, symbol: str, manifest, count: int = 60) -> Dict:
+def incremental_update(conn, symbol: str, manifest, count: int = 60,
+                       client=None) -> Dict:
     """增量缓存（架构 P1 DataHub）：manifest 完整时只拉最近 N 根并追加新 bar。
 
     - 以 manifest.last_completed 为断点（DataHub 增量断点，见 shared/db.get_last_bar）
@@ -392,8 +407,9 @@ def incremental_update(conn, symbol: str, manifest, count: int = 60) -> Dict:
     """
     last_ts = manifest["last_completed"]
     _reserve_longbridge(conn, "kline")
-    from shared.longbridge_client import LongbridgeClient
-    client = LongbridgeClient(scope="quote")
+    if client is None:
+        from shared.longbridge_client import LongbridgeClient
+        client = LongbridgeClient(scope="quote")
     klines = client.kline_by_count(symbol, count=count, period="day")
     _sync_market_calendar(conn, client, symbol, last_ts)
     if not klines:
@@ -442,21 +458,30 @@ def incremental_update(conn, symbol: str, manifest, count: int = 60) -> Dict:
     }
 
 
-def cache_symbol(conn, symbol: str, count: int = 800) -> Dict:
+def cache_symbol(conn, symbol: str, count: int = 800, client=None) -> Dict:
     """从长桥拉取日线写入缓存（bars + data_manifest），返回结果摘要。
 
     缓存优先（幂等）：data_manifest 已存在且完整（bar_count>=630）时直接返回
     缓存信息，不再调长桥（不产生重复行）。
     拉取失败/返回空/数据不足时抛 RuntimeError，由 CLI 层转成 stderr + 非零退出码。
     """
+    if client is None:
+        from shared.longbridge_client import LongbridgeClient
+        client = LongbridgeClient(scope="quote")
+    from shared.security import SecurityService
+    metadata_result = SecurityService(conn, client).ensure_batch([symbol])[0]
+    if not metadata_result["ok"]:
+        dbm.audit(conn, "SECURITY_METADATA_FAILED", "symbol", symbol,
+                  metadata_result)
+
     manifest = dbm.get_manifest(conn, symbol)
     if _manifest_complete(manifest):
         # 缓存完整 → 增量更新（P1 DataHub：只拉新 bar，不全量重拉）
-        return incremental_update(conn, symbol, manifest, count=60)
+        result = incremental_update(conn, symbol, manifest, count=60, client=client)
+        result["metadata"] = metadata_result
+        return result
 
     _reserve_longbridge(conn, "kline")
-    from shared.longbridge_client import LongbridgeClient
-    client = LongbridgeClient(scope="quote")
     klines = client.kline_by_count(symbol, count=count, period="day")
 
     if not klines:
@@ -479,6 +504,7 @@ def cache_symbol(conn, symbol: str, count: int = 800) -> Dict:
         "date_end": rows[-1]["ts"],
         "sha256": sha,
         "source": "longbridge",
+        "metadata": metadata_result,
     }
 
 
@@ -925,7 +951,9 @@ def main():
     conn = dbm.get_core_conn()
 
     if args.cmd == "add":
-        print(add_candidate(conn, args.symbol))
+        from shared.security import LazyLongbridgeSecurityProvider, SecurityService
+        service = SecurityService(conn, LazyLongbridgeSecurityProvider())
+        print(add_candidate(conn, args.symbol, security_service=service))
     elif args.cmd == "sync":
         report = sync_watchlist(conn)
         print(json.dumps(report, ensure_ascii=False, indent=2))

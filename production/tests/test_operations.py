@@ -91,6 +91,8 @@ def test_position_query_failure_degrades_previously_synced_account():
 def test_current_risk_check_uses_real_snapshot_and_fails_on_stale_account():
     conn = dbm.get_conn(":memory:")
     _position(conn)
+    dbm.upsert_security(
+        conn, "A.US", "A", "NASDAQ", "USD", asset_type="EQUITY")
     dbm.upsert_account(conn, "default", "SYNCED", cash=80_000,
                        buying_power=50_000, nav=100_000)
     passed = check_current_portfolio(conn)
@@ -102,6 +104,18 @@ def test_current_risk_check_uses_real_snapshot_and_fails_on_stale_account():
     rejected = check_current_portfolio(conn, account_state=stale)
     assert not rejected["passed"]
     assert rejected["failures"] == ["account_not_synced:STALE"]
+
+
+def test_current_portfolio_risk_rejects_unknown_metadata():
+    conn = dbm.get_core_conn(":memory:")
+    _position(conn)
+    synced = AccountState(account_id="default", sync_status="SYNCED",
+                          cash=100_000, nav=100_000)
+
+    result = check_current_portfolio(conn, account_state=synced)
+
+    assert not result["passed"]
+    assert result["failures"] == ["unknown_security_metadata:A.US"]
 
 
 def test_batch_reconciliation_restores_synced_or_sets_mismatch():
