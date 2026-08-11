@@ -323,14 +323,6 @@ def _load_sdk():
         return False
 
 
-def _build_sdk_config(config_kwargs: dict):
-    """兼容 0.2.x 的构造器与 4.x 的 API-key 工厂。"""
-    factory = getattr(_Config, "from_apikey", None)
-    if callable(factory):
-        return factory(**config_kwargs)
-    return _Config(**config_kwargs)
-
-
 # ============ 主客户端类 ============
 
 class LongbridgeClient:
@@ -379,7 +371,7 @@ class LongbridgeClient:
                 "longbridge Python SDK 未安装。请运行: "
                 f"pip install longbridge=={LONG_BRIDGE_SDK_VERSION}")
         
-        # API-key 认证不进入 CLI/OAuth；SDK 4.x 使用 from_apikey，旧版使用构造器。
+        # API-key 认证不进入 CLI/OAuth；Longbridge 4.4.3 使用 from_apikey。
         config_kwargs = {
             "app_key": self._app_key,
             "app_secret": self._app_secret,
@@ -392,7 +384,7 @@ class LongbridgeClient:
         ):
             if os.environ.get(env_key):
                 config_kwargs[argument] = os.environ[env_key]
-        self._config = _build_sdk_config(config_kwargs)
+        self._config = _Config.from_apikey(**config_kwargs)
         # 最小权限：行情进程不创建 TradeContext；执行进程不创建 QuoteContext。
         self._quote_ctx = _QuoteContext(self._config) if scope in ("quote", "both") else None
         self._trade_ctx = _TradeContext(self._config) if scope in ("trade", "both") else None

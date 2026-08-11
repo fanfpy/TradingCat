@@ -64,32 +64,7 @@ def test_client_requires_all_three_legacy_credentials(monkeypatch, tmp_path):
         lb.LongbridgeClient(app_key="app-key", access_token="legacy-token")
 
 
-def test_client_uses_compatible_sdk_config_constructor(monkeypatch):
-    _clear_longbridge_env(monkeypatch)
-    calls = []
-
-    class FakeConfig:
-        def __init__(self, **kwargs):
-            calls.append(kwargs)
-
-    class FakeContext:
-        def __init__(self, config):
-            assert isinstance(config, FakeConfig)
-
-    monkeypatch.setattr(lb, "_load_sdk", lambda: True)
-    monkeypatch.setattr(lb, "_Config", FakeConfig)
-    monkeypatch.setattr(lb, "_QuoteContext", FakeContext)
-    monkeypatch.setattr(lb, "_TradeContext", FakeContext)
-
-    client = lb.LongbridgeClient(
-        app_key="app-key", app_secret="app-secret", access_token="legacy-token")
-
-    assert isinstance(client._config, FakeConfig)
-    assert calls == [{"app_key": "app-key", "app_secret": "app-secret",
-                      "access_token": "legacy-token"}]
-
-
-def test_client_uses_apikey_factory_when_sdk_exposes_it(monkeypatch):
+def test_client_uses_sdk_apikey_factory(monkeypatch):
     _clear_longbridge_env(monkeypatch)
     calls = []
 
@@ -122,6 +97,10 @@ def test_quote_and_trade_contexts_are_structurally_isolated(monkeypatch):
     class FakeConfig:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+
+        @classmethod
+        def from_apikey(cls, **kwargs):
+            return cls(**kwargs)
 
     class QuoteContext:
         def __init__(self, config):
@@ -172,6 +151,10 @@ def test_client_preserves_sdk_endpoint_with_scoped_context(monkeypatch, tmp_path
         def __init__(self, **kwargs):
             calls.append(kwargs)
 
+        @classmethod
+        def from_apikey(cls, **kwargs):
+            return cls(**kwargs)
+
     class FakeContext:
         def __init__(self, config):
             assert isinstance(config, CurrentConfig)
@@ -192,6 +175,10 @@ def test_v4_static_info_normalizes_list_and_dividend_semantics(monkeypatch):
     class FakeConfig:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+
+        @classmethod
+        def from_apikey(cls, **kwargs):
+            return cls(**kwargs)
 
     class QuoteContext:
         def __init__(self, config):
