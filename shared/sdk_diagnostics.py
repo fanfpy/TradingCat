@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 from typing import Dict
 
+from shared.longbridge_client import LONG_BRIDGE_SDK_VERSION
+
 # 允许既作为模块导入，也从项目根目录直接执行本文件。
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -15,7 +17,7 @@ def diagnose_longbridge(*, connect: bool = False,
                         quote_symbol: str = "AAPL.US",
                         require_credentials: bool = True) -> Dict:
     result = {
-        "sdk": "longbridge", "required_version": "0.2.74",
+        "sdk": "longbridge", "required_version": LONG_BRIDGE_SDK_VERSION,
         "installed": False, "version": None, "credentials": {},
         "capabilities": {}, "connectivity": "NOT_RUN",
         "fundamental_connectivity": "NOT_RUN",

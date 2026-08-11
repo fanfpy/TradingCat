@@ -93,8 +93,8 @@ def main() -> int:
 
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    if "longbridge==0.2.74" not in requirements or "longbridge==0.2.74" not in pyproject:
-        errors.append("Longbridge must remain exactly pinned to 0.2.74")
+    if "longbridge==4.4.3" not in requirements or "longbridge==4.4.3" not in pyproject:
+        errors.append("Longbridge must remain exactly pinned to 4.4.3")
     if "Apache License" not in (ROOT / "LICENSE").read_text(encoding="utf-8"):
         errors.append("LICENSE is not Apache License 2.0 text")
 

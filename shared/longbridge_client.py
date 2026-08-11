@@ -37,6 +37,7 @@ from decimal import Decimal
 
 
 logger = logging.getLogger(__name__)
+LONG_BRIDGE_SDK_VERSION = "4.4.3"
 
 
 class LongbridgeError(RuntimeError):
@@ -322,6 +323,14 @@ def _load_sdk():
         return False
 
 
+def _build_sdk_config(config_kwargs: dict):
+    """兼容 0.2.x 的构造器与 4.x 的 API-key 工厂。"""
+    factory = getattr(_Config, "from_apikey", None)
+    if callable(factory):
+        return factory(**config_kwargs)
+    return _Config(**config_kwargs)
+
+
 # ============ 主客户端类 ============
 
 class LongbridgeClient:
@@ -367,9 +376,10 @@ class LongbridgeClient:
         
         if not _load_sdk():
             raise RuntimeError(
-                "longbridge Python SDK 未安装。请运行: pip install longbridge==0.2.74")
+                "longbridge Python SDK 未安装。请运行: "
+                f"pip install longbridge=={LONG_BRIDGE_SDK_VERSION}")
         
-        # 项目固定 SDK 0.2.74，直接使用其 API Key 构造器，不进入 CLI/OAuth。
+        # API-key 认证不进入 CLI/OAuth；SDK 4.x 使用 from_apikey，旧版使用构造器。
         config_kwargs = {
             "app_key": self._app_key,
             "app_secret": self._app_secret,
@@ -382,7 +392,7 @@ class LongbridgeClient:
         ):
             if os.environ.get(env_key):
                 config_kwargs[argument] = os.environ[env_key]
-        self._config = _Config(**config_kwargs)
+        self._config = _build_sdk_config(config_kwargs)
         # 最小权限：行情进程不创建 TradeContext；执行进程不创建 QuoteContext。
         self._quote_ctx = _QuoteContext(self._config) if scope in ("quote", "both") else None
         self._trade_ctx = _TradeContext(self._config) if scope in ("trade", "both") else None
@@ -1108,7 +1118,7 @@ class LongbridgeClient:
 
     @staticmethod
     def _asset_type_from_static_info(response) -> str:
-        """从 SDK 0.2.74 ``SecurityStaticInfo.board`` 保守映射资产类型。
+        """从 SDK ``SecurityStaticInfo.board`` 保守映射资产类型。
 
         ``SecurityStaticInfo`` 没有 instrument/security/asset type 字段；其
         ``board`` 还是一个可能以 ``SecurityBoard.USMain`` 或 ``USMain``
@@ -1520,7 +1530,7 @@ class LongbridgeClient:
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
 ║ 1. 安装本项目锁定的长桥 Python SDK:                          ║
-║    pip install longbridge==0.2.74                            ║
+║    pip install longbridge==4.4.3                             ║
 ║                                                              ║
 ║ 2. 在项目 .env 设置开放平台 Legacy API Key 三凭证:          ║
 ║    LONGBRIDGE_APP_KEY / LONGBRIDGE_APP_SECRET /             ║

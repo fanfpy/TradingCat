@@ -1,4 +1,4 @@
-"""DataHub 同步边界：长桥 0.2.74 交易日历 -> StateRepository。"""
+"""DataHub 同步边界：长桥 4.4.3 交易日历 -> StateRepository。"""
 
 from datetime import date
 
