@@ -4,54 +4,73 @@ from shared.security import SecurityService
 
 
 def _info(symbol, *, board, currency="USD", name="Company",
-          total=1000, circulating=900, eps=2.0, explicit=None):
+          total=1000, circulating=900, eps=2.0):
     fields = {
         "symbol": symbol, "board": board, "currency": currency,
+        "exchange": "NASDAQ" if currency == "USD" else "HKEX",
+        "lot_size": 1 if currency == "USD" else 100,
         "name_en": name, "name_cn": "", "name_hk": "",
+        "hk_shares": 0, "stock_derivatives": [],
         "total_shares": total, "circulating_shares": circulating,
         "eps": eps, "eps_ttm": eps, "bps": 10.0,
+        "dividend_yield": 0,
     }
-    if explicit is not None:
-        fields["instrument_type"] = explicit
     return type("StaticInfo", (), fields)()
 
 
-def test_us_main_company_evidence_maps_aapl_and_amd_to_equity():
-    for symbol in ("AAPL.US", "AMD.US"):
-        info = _info(symbol, board="SecurityBoard.USMain", name=symbol)
-        assert LongbridgeClient._asset_type_from_static_info(info) == "EQUITY"
+class _UsMainEnum:
+    name = "USMain"
+
+    def __str__(self):
+        return "SecurityBoard.USMain"
+
+
+def test_us_main_and_us_pink_board_expressions_map_company_to_equity():
+    assert LongbridgeClient._asset_type_from_static_info(
+        _info("AAPL.US", board="SecurityBoard.USMain", name="AAPL")) == "EQUITY"
+    assert LongbridgeClient._asset_type_from_static_info(
+        _info("AMD.US", board=_UsMainEnum(), name="AMD")) == "EQUITY"
+    assert LongbridgeClient._asset_type_from_static_info(
+        _info("PINK.US", board="USPink", name="Pink Company")) == "EQUITY"
+
+
+def test_us_main_does_not_require_total_shares_to_exceed_circulating_shares():
+    info = _info("AAPL.US", board="USMain", name="Apple",
+                 total=100, circulating=120)
+    assert LongbridgeClient._asset_type_from_static_info(info) == "EQUITY"
 
 
 def test_hk_equity_board_maps_to_equity_without_currency_guess():
     info = _info(
-        "0700.HK", board="SecurityBoard.HKEquity", currency="HKD",
+        "0700.HK", board="HKEquity", currency="HKD",
         name="Tencent")
     assert LongbridgeClient._asset_type_from_static_info(info) == "EQUITY"
     assert info.currency == "HKD"
 
 
-def test_explicit_etf_is_preserved_and_leveraged_name_is_not_equity():
-    etf = _info("ETF.US", board="SecurityBoard.USMain", explicit="ETF")
-    leveraged = _info(
-        "LEV.US", board="SecurityBoard.USMain", name="Example Bull 3X",
-        total=1000, circulating=1000, eps=0)
-    assert LongbridgeClient._asset_type_from_static_info(etf) == "ETF"
+def test_us_main_ambiguous_fund_types_remain_unknown():
+    etf = _info("ETF.US", board="USMain", name="SPDR S&P 500 ETF Trust",
+                 eps=0)
+    leveraged = _info("LEV.US", board="USMain", name="Example Bull 3X",
+                      eps=0)
+    assert LongbridgeClient._asset_type_from_static_info(etf) == "UNKNOWN"
     assert LongbridgeClient._asset_type_from_static_info(leveraged) == "UNKNOWN"
 
 
 def test_reit_option_and_warrant_are_never_plain_equity():
-    reit = _info(
-        "REIT.US", board="SecurityBoard.USMain", explicit="REIT")
+    reit = _info("REIT.US", board="USMain", name="Example REIT", eps=0)
     option = _info("OPT.US", board="SecurityBoard.USOption")
+    option_s = _info("OPTS.US", board="USOptionS")
     warrant = _info("WAR.HK", board="SecurityBoard.HKWarrant", currency="HKD")
-    assert LongbridgeClient._asset_type_from_static_info(reit) == "REIT"
+    assert LongbridgeClient._asset_type_from_static_info(reit) == "UNKNOWN"
     assert LongbridgeClient._asset_type_from_static_info(option) == "OPTION"
+    assert LongbridgeClient._asset_type_from_static_info(option_s) == "OPTION"
     assert LongbridgeClient._asset_type_from_static_info(warrant) == "WARRANT"
 
 
 def test_unknown_instrument_remains_unknown_despite_us_suffix():
     unknown = _info(
-        "MYSTERY.US", board="SecurityBoard.Unknown", total=0,
+        "MYSTERY.US", board="Unknown", total=0,
         circulating=0, eps=0)
     assert LongbridgeClient._asset_type_from_static_info(unknown) == "UNKNOWN"
 

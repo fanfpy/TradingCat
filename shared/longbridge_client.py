@@ -1108,56 +1108,53 @@ class LongbridgeClient:
 
     @staticmethod
     def _asset_type_from_static_info(response) -> str:
-        """基于 SDK static_info 明确信息保守映射资产类型。"""
-        explicit = str(
-            getattr(response, "instrument_type", "")
-            or getattr(response, "security_type", "")
-            or getattr(response, "asset_type", "")
-            or ""
-        ).split(".")[-1].upper().replace(" ", "_")
-        explicit_types = {
-            "STOCK": "EQUITY", "COMMON_STOCK": "EQUITY", "EQUITY": "EQUITY",
-            "ETF": "ETF", "REIT": "REIT", "WARRANT": "WARRANT",
-            "OPTION": "OPTION", "LEVERAGED_ETF": "LEVERAGED_ETF",
-        }
-        if explicit in explicit_types:
-            return explicit_types[explicit]
+        """从 SDK 0.2.74 ``SecurityStaticInfo.board`` 保守映射资产类型。
 
-        board = str(getattr(response, "board", "") or "")
-        if board in {"SecurityBoard.USOption", "SecurityBoard.USOptionS"}:
+        ``SecurityStaticInfo`` 没有 instrument/security/asset type 字段；其
+        ``board`` 还是一个可能以 ``SecurityBoard.USMain`` 或 ``USMain``
+        表示的枚举。因此只使用 board 的明确衍生品语义，并对 USMain/USPink
+        仅在同时具备普通公司的静态证据时返回 EQUITY。ETF、REIT 和杠杆 ETF
+        不能从该 SDK 的字段可靠区分时返回 UNKNOWN，交给上层 fail closed。
+        """
+        raw_board = getattr(response, "board", None)
+        board = str(getattr(raw_board, "name", None) or raw_board or "")
+        board = board.rsplit(".", 1)[-1].strip()
+
+        if board in {"USOption", "USOptionS"}:
             return "OPTION"
-        if board == "SecurityBoard.HKWarrant":
+        if board == "HKWarrant":
             return "WARRANT"
         if board in {
-            "SecurityBoard.HKEquity",
-            "SecurityBoard.SHMainConnect", "SecurityBoard.SHMainNonConnect",
-            "SecurityBoard.SHSTAR", "SecurityBoard.SZMainConnect",
-            "SecurityBoard.SZMainNonConnect", "SecurityBoard.SZGEMConnect",
-            "SecurityBoard.SZGEMNonConnect",
+            "HKEquity", "SHMainConnect", "SHMainNonConnect", "SHSTAR",
+            "SZMainConnect", "SZMainNonConnect", "SZGEMConnect",
+            "SZGEMNonConnect",
         }:
             return "EQUITY"
-        if board != "SecurityBoard.USMain":
+        if board not in {"USMain", "USPink"}:
             return "UNKNOWN"
 
         name = " ".join(str(getattr(response, field, "") or "")
                         for field in ("name_en", "name_cn", "name_hk")).casefold()
         non_company_markers = (
-            " etf", "fund", "trust", "reit", "realty", "properties",
-            "property", "ultrapro", "ultra ", " 2x", " 3x", "bull 2",
-            "bull 3", "bear 2", "bear 3", "inverse",
+            "etf", "fund", "trust", "reit", "realty", "properties",
+            "property", "ultrapro", "ultra ", " 2x", " 3x", "bull",
+            "bear", "inverse", "leveraged",
         )
         if any(marker in name for marker in non_company_markers):
             return "UNKNOWN"
 
+        # USMain/USPink 也承载 ETF、REIT 等证券；名称没有明确公司语义时
+        # 不把 board 当成普通股证据。不要用 total_shares 与
+        # circulating_shares 的大小关系：AAPL 等合法数据可能
+        # total_shares <= circulating_shares。
         total = int(getattr(response, "total_shares", 0) or 0)
-        circulating = int(getattr(response, "circulating_shares", 0) or 0)
         financials = (
             float(getattr(response, "eps", 0) or 0),
             float(getattr(response, "eps_ttm", 0) or 0),
             float(getattr(response, "bps", 0) or 0),
         )
         has_company_financials = any(abs(value) > 1e-12 for value in financials)
-        return ("EQUITY" if total > circulating > 0 and has_company_financials
+        return ("EQUITY" if total > 0 and has_company_financials
                 else "UNKNOWN")
 
     def trading_calendar(self, market: str, start, end) -> List[dict]:

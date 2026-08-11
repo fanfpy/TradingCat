@@ -47,6 +47,7 @@ def _static_response(symbol, *, board="SecurityBoard.USMain"):
         "symbol": symbol, "name_en": "Advanced Micro Devices",
         "name_cn": "", "name_hk": "", "exchange": "NASD",
         "currency": "USD", "lot_size": 1, "board": board,
+        "hk_shares": 0, "stock_derivatives": [], "dividend_yield": 0,
         "total_shares": 1_600_000_000,
         "circulating_shares": 1_500_000_000,
         "eps": 2.6, "eps_ttm": 3.9, "bps": 41.0,

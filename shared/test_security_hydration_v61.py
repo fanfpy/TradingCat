@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from production.operations import check_current_portfolio, sync_runtime_state
+from shared.account import sync_account, sync_positions
 from research.pipeline import add_candidate, cache_symbol, sync_watchlist
 from shared import db as dbm
 from shared.security import SecurityService
@@ -50,6 +51,9 @@ class AccountClient:
     def orders(self, strict=True):
         return []
 
+    def static_info(self, symbol):
+        return _metadata(symbol, "HKD")
+
 
 def test_watchlist_sync_hydrates_new_candidates():
     conn = dbm.get_core_conn(":memory:")
@@ -96,3 +100,31 @@ def test_account_sync_hydrates_new_position_metadata_once():
     risk = check_current_portfolio(conn)
     assert not any(item.startswith("unknown_security_metadata:")
                    for item in risk["failures"])
+
+
+def test_direct_sync_account_does_not_bypass_metadata_hydration():
+    conn = dbm.get_core_conn(":memory:")
+    client = AccountClient()
+
+    result = sync_account(conn, client=client)
+
+    assert result.synced
+    assert result.metadata_failures == []
+    assert dbm.get_security(conn, "0700.HK")["currency"] == "HKD"
+
+
+def test_direct_sync_positions_exposes_unknown_metadata_and_fails_closed():
+    conn = dbm.get_core_conn(":memory:")
+
+    class UnknownClient(AccountClient):
+        def positions(self, strict=True):
+            return [{"symbol": "MYSTERY.US", "quantity": "1", "cost_price": "10"}]
+
+        def static_info(self, symbol):
+            return _metadata(symbol, asset_type="UNKNOWN")
+
+    result = sync_positions(conn, client=UnknownClient())
+
+    assert result["synced"] is False
+    assert result["metadata_failures"]
+    assert dbm.get_security(conn, "MYSTERY.US") is None

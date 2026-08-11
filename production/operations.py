@@ -24,8 +24,14 @@ def sync_runtime_state(conn, client=None, account_id: str = "default",
         conn, client=client, account_id=account_id,
         security_service=security_service)
     final = ensure_synced(conn, account_id)
+    # ensure_synced 只读取数据库快照；把本次 hydration 结果附加到返回值，
+    # 使 metadata failure 不会在编排层被吞掉。
+    final.metadata = account.metadata
+    final.metadata_failures = account.metadata_failures
     result = {
-        "ok": account.synced and positions["synced"] and final.synced,
+        "ok": (account.synced and positions["synced"] and final.synced
+               and not account.metadata_failures
+               and not positions.get("metadata_failures")),
         "account": asdict(final),
         "position_sync": positions,
     }

@@ -33,6 +33,10 @@ class AccountBroker:
     def orders(self):
         return []
 
+    def static_info(self, symbol):
+        return {"symbol": symbol, "name": symbol, "exchange": "NASDAQ",
+                "currency": "USD", "asset_type": "EQUITY", "lot_size": 1}
+
 
 def _position(conn):
     dbm.upsert_position(conn, "A.US", entry_price=90, entry_ts="2026-01-01",

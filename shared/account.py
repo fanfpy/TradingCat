@@ -47,6 +47,8 @@ class AccountState:
     open_orders: List[Dict] = field(default_factory=list)
     updated_at: Optional[str] = None
     raw_json: Optional[str] = None
+    metadata: List[Dict] = field(default_factory=list)
+    metadata_failures: List[Dict] = field(default_factory=list)
 
     @property
     def synced(self) -> bool:
@@ -106,17 +108,23 @@ def sync_account(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
         buying_power = first_present("buying_power", "net_buying_power", "max_finance_amount")
         nav = first_present("net_assets", "nav", "equity")
         positions = _broker_collection(client, "positions") if hasattr(client, "positions") else []
-        if security_service is not None:
-            metadata_results = security_service.ensure_batch(
-                position.get("symbol", "") for position in positions)
-            failures = [item for item in metadata_results if not item["ok"]]
-            if failures:
-                dbm.audit(conn, "SECURITY_METADATA_FAILED", "account", account_id,
-                          {"failures": failures})
+        if security_service is None:
+            from shared.security import LazyLongbridgeSecurityProvider, SecurityService
+            provider = client if hasattr(client, "static_info") else LazyLongbridgeSecurityProvider()
+            security_service = SecurityService(conn, provider)
+        metadata_results = security_service.ensure_batch(
+            position.get("symbol", "") for position in positions)
+        failures = [item for item in metadata_results if not item["ok"]]
+        if failures:
+            dbm.audit(conn, "SECURITY_METADATA_FAILED", "account", account_id,
+                      {"failures": failures})
+        old = dbm.get_account(conn, account_id)
+        sync_status = "UNKNOWN" if old is None else "STALE"
+        persisted_status = sync_status if failures else "SYNCED"
         open_orders = _broker_collection(client, "orders") if hasattr(client, "orders") else []
         state = AccountState(
             account_id=account_id,
-            sync_status="SYNCED",
+            sync_status=persisted_status,
             cash=float(cash) if cash is not None else None,
             buying_power=float(buying_power) if buying_power is not None else None,
             nav=float(nav) if nav is not None else None,
@@ -124,13 +132,16 @@ def sync_account(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
             open_orders=open_orders or [],
             updated_at=dbm._now(),
             raw_json=str(assets)[:2000],
+            metadata=metadata_results,
+            metadata_failures=failures,
         )
-        dbm.upsert_account(conn, account_id, "SYNCED", state.cash, state.buying_power,
+        dbm.upsert_account(conn, account_id, persisted_status, state.cash, state.buying_power,
                            state.raw_json, nav=state.nav)
         dbm.audit(conn, "ACCOUNT_SYNC", entity_type="account", entity_id=account_id,
-                  payload={"sync_status": "SYNCED", "cash": state.cash,
+                  payload={"sync_status": persisted_status, "cash": state.cash,
                            "buying_power": state.buying_power, "nav": state.nav,
-                           "positions": len(state.positions), "open_orders": len(state.open_orders)})
+                           "positions": len(state.positions), "open_orders": len(state.open_orders),
+                           "metadata_failures": failures})
         return state
     except Exception as e:
         # 同步失败：降级，不抛（交易系统不能因账户查询失败而崩）
@@ -139,7 +150,8 @@ def sync_account(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
         dbm.set_account_sync_status(conn, account_id, degraded)
         dbm.audit(conn, "ACCOUNT_SYNC", entity_type="account", entity_id=account_id,
                   payload={"sync_status": degraded, "error": str(e)[:500]})
-        return AccountState(account_id=account_id, sync_status=degraded)
+        return AccountState(account_id=account_id, sync_status=degraded,
+                            metadata_failures=[{"error_message": str(e)[:500]}])
 
 
 def ensure_synced(conn, account_id: str = DEFAULT_ACCOUNT_ID,
@@ -169,16 +181,16 @@ def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
         {synced: bool, positions: [...], mismatch: bool, details: str}
     """
     try:
-        owns_client = client is None
         if client is None:
             from shared.longbridge_client import LongbridgeClient
             client = LongbridgeClient(scope="trade")
-        if security_service is None and owns_client:
+        if security_service is None:
             from shared.security import (
                 LazyLongbridgeSecurityProvider, SecurityService,
             )
+            provider = client if hasattr(client, "static_info") else LazyLongbridgeSecurityProvider()
             security_service = SecurityService(
-                conn, LazyLongbridgeSecurityProvider())
+                conn, provider)
         broker_positions = _broker_collection(client, "positions") or []
         metadata_results = (security_service.ensure_batch(
             position.get("symbol", "") for position in broker_positions)
@@ -209,15 +221,23 @@ def sync_positions(conn, client=None, account_id: str = DEFAULT_ACCOUNT_ID,
             if sym not in broker_map and abs(local_qty) > 0.001:
                 mismatches.append(f"{sym}: broker=0 local={local_qty} (可能已平仓)")
 
-        ok = not mismatches
-        if not ok:
+        ok = not mismatches and not metadata_failures
+        if mismatches:
             dbm.set_account_sync_status(conn, account_id, "MISMATCH")
+        elif metadata_failures:
+            old = dbm.get_account(conn, account_id)
+            dbm.set_account_sync_status(
+                conn, account_id, "STALE" if old is not None else "UNKNOWN")
+        detail_parts = list(mismatches)
+        if metadata_failures:
+            detail_parts.append("metadata failed")
         dbm.audit(conn, "POSITION_SYNC", entity_type="account", entity_id=account_id,
                   payload={"ok": ok, "mismatches": mismatches,
                            "broker_count": len(broker_positions),
-                           "local_count": len(local_positions)})
+                           "local_count": len(local_positions),
+                           "metadata_failures": metadata_failures})
         return {"synced": ok, "positions": broker_map, "mismatch": not ok,
-            "details": "; ".join(mismatches) if mismatches else "ok",
+            "details": "; ".join(detail_parts) if detail_parts else "ok",
             "metadata": metadata_results,
             "metadata_failures": metadata_failures}
     except Exception as e:
