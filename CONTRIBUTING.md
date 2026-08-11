@@ -30,7 +30,7 @@ TRADINGCAT_ENV_FILE=/tmp/tradingcat-no-env \
 
 ## 修改要求
 
-- 保持 `longbridge==0.2.74`；升级 SDK 必须单独提案并提供跨平台证据。
+- 保持 `longbridge==4.4.3`；升级 SDK 必须单独提案并提供跨平台证据。
 - 业务数据库访问必须经过 `shared/db.py`，不要直接打开 SQLite。
 - 历史基本面必须提供 period/published/available/source，禁止 current 数据回填 PIT。
 - 回测最终资格只能由 Native 引擎、嵌套 Walk-Forward 和 Final Holdout 决定。

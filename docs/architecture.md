@@ -61,7 +61,7 @@ flowchart TB
         EXECDB[("Execution Store<br/>仅 executiond 可写")]
     end
 
-    LB["Longbridge SDK 0.2.74<br/>行情、交易日历、账户与券商接口"]
+    LB["Longbridge SDK 4.4.3<br/>行情、交易日历、账户与券商接口"]
     CURRENT["OpenAlice 等可选 Provider<br/>只提供当前基本面，不具备 PIT 资格"]
     PIT["经授权的 PIT 数据源<br/>必须提供三时间与来源"]
 
@@ -174,9 +174,9 @@ flowchart LR
 - `FundamentalPITProvider`：仅供历史研究，必须同时提供 `period_end`、
   `published_at`、`available_at` 和 `source`，缺一即拒绝。
 
-项目固定 `longbridge==0.2.74`。该版本不提供 `FundamentalContext`，因此长桥只承担行情、
-交易日历、账户和券商功能；当前基本面未配置外部 Provider 时明确返回
-`MISSING_SAFE_DEGRADE`，不会调用 CLI/OAuth，也不会生成伪值。
+项目固定 `longbridge==4.4.3`。长桥基本面接口按能力探测；只有满足时间有效性和来源要求的
+PIT 数据才进入研究链。未配置合格 Provider 时明确返回 `MISSING_SAFE_DEGRADE`，不会调用
+CLI/OAuth，也不会生成伪值。
 
 ## 6. 仓位与组合决策
 
@@ -223,7 +223,7 @@ Signal → PositionIntent → TargetPortfolio → PortfolioRisk
 |---|---|---|
 | Core Store | TradingCat Core | 行情缓存、研究证据、策略版本、关注、信号、计划、审计 |
 | Execution Store | executiond | Confirmation、ApprovalProof、OrderIntent、BrokerAck、Fill、对账 |
-| Longbridge | SDK 0.2.74 | 行情、日历、账户状态和券商事实 |
+| Longbridge | SDK 4.4.3 | 行情、日历、账户状态和券商事实；基本面能力按需探测 |
 | Reports | monitor/subscribe | 人类可读与机器可读报告，不作为交易真相源 |
 
 所有 SQLite 访问都通过 `shared/db.py` 的 StateRepository 能力，启用 WAL、外键、
@@ -261,7 +261,7 @@ JSON envelope 版本为 `tradingcat.v1`。上层 Agent 只需调用这些用例�
 
 ## 11. 当前运行状态
 
-- SDK：正式支持且固定为 `longbridge==0.2.74`；
+- SDK：正式支持且固定为 `longbridge==4.4.3`；
 - 行情：AAPL 真实只读连接已通过；
 - 基本面：默认安全缺失，可选 OpenAlice current-only adapter；
 - 研究/监控/组合/DRY_RUN：自动验收通过；

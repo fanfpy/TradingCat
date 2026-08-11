@@ -16,7 +16,7 @@ python3 -m venv .venv
 cp .env.example .env
 ```
 
-项目固定 `longbridge==0.2.74`，不需要 Rust、源码编译或定制 QwenPaw 镜像。
+项目固定 `longbridge==4.4.3`，不需要 Rust、源码编译或定制 QwenPaw 镜像。
 
 ## 2. 配置
 

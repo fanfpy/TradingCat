@@ -21,7 +21,7 @@ shell = false
 ```
 
 若项目虚拟环境不存在，先报告安装未完成，不要自行改用系统中不确定版本的 Longbridge
-SDK。正式支持版本固定为 `longbridge==0.2.74`。
+SDK。正式支持版本固定为 `longbridge==4.4.3`。
 
 ## 2. 意图分发表
 

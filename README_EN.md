@@ -27,7 +27,7 @@ cannot approve or submit a live order.
 
 ## Quick start
 
-Python 3.10 or 3.11 is recommended. The supported Longbridge SDK is pinned to `0.2.74`.
+Python 3.10 or 3.11 is recommended. The supported Longbridge SDK is pinned to `4.4.3`.
 
 ```bash
 python3 -m venv .venv
@@ -38,9 +38,8 @@ cp .env.example .env
 ```
 
 TradingCat never reads a Longbridge CLI OAuth token and never launches browser authentication.
-Longbridge SDK 0.2.74 has no `FundamentalContext`; fundamentals therefore degrade explicitly unless
-an optional current-only provider is configured. Technical research and execution safety are not
-affected.
+Longbridge fundamental capabilities are detected at runtime; fundamentals therefore degrade explicitly
+unless a qualified PIT provider is configured. Technical research and execution safety are not affected.
 
 ## Personal-investor workflow
 

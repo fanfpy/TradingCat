@@ -47,7 +47,7 @@ flowchart LR
         EXECDB[("Execution Store<br/>审批、订单和成交事实")]
     end
 
-    LB["Longbridge SDK 0.2.74<br/>行情、日历、账户与券商接口"]
+    LB["Longbridge SDK 4.4.3<br/>行情、日历、账户与券商接口"]
     FUND["可选当前基本面 Provider<br/>OpenAlice JSON 适配器；禁止回填历史 PIT"]
 
     USER --> AGENT --> APP
@@ -69,7 +69,7 @@ flowchart LR
 
 ## 快速开始
 
-要求 Python 3.10+。为保证可移植性，项目固定 `longbridge==0.2.74`。
+要求 Python 3.10+。为保证可移植性，项目固定 `longbridge==4.4.3`。
 
 ```bash
 python3 -m venv .venv
@@ -79,8 +79,8 @@ cp .env.example .env
 ./.venv/bin/python shared/sdk_diagnostics.py --connect
 ```
 
-不会读取 Longbridge CLI OAuth token，也不会弹出浏览器认证。SDK 0.2.74 没有
-`FundamentalContext`，所以基本面默认显示为缺失；技术研究与安全执行链不受影响。
+不会读取 Longbridge CLI OAuth token，也不会弹出浏览器认证。SDK 基本面能力按运行时能力探测；
+未配置合格的 PIT 数据源时基本面仍明确显示为缺失，技术研究与安全执行链不受影响。
 
 ## 个人投资闭环
 

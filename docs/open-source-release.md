@@ -88,5 +88,5 @@ git push -u origin main
 5. 发布 GitHub Release，列出安全边界、迁移说明和已知限制；
 6. PyPI 发布应先使用 TestPyPI 验证，且不要把券商凭证写入构建环境。
 
-发布说明必须明确：默认 `DRY_RUN_ONLY`、Longbridge 固定 0.2.74、基本面默认安全缺失、
+发布说明必须明确：默认 `DRY_RUN_ONLY`、Longbridge 固定 4.4.3、基本面默认安全缺失、
 软件不构成投资建议。

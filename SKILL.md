@@ -126,8 +126,8 @@ printf '{"query":"AAPL","reason":"等待趋势信号"}' |
 ## Respect data boundaries
 
 - Use `shared/longbridge_client.py` as the only Longbridge Python SDK wrapper.
-- Require `longbridge==0.2.74`; do not upgrade it or invoke Longbridge CLI/OAuth.
-- Expect no Longbridge `FundamentalContext` on this version.
+- Require `longbridge==4.4.3`; do not invoke Longbridge CLI/OAuth.
+- Detect optional Longbridge fundamental capabilities at runtime and fail safe when unavailable.
 - Use optional OpenAlice JSON-stdio data only as a current snapshot.
 - Admit historical fundamentals only with explicit `period_end`, `published_at`, `available_at`,
   and `source`; otherwise fail closed.

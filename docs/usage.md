@@ -27,7 +27,7 @@ LONGBRIDGE_ACCESS_TOKEN=...
 ./.venv/bin/python shared/sdk_diagnostics.py --connect --symbol AAPL.US
 ```
 
-期望结果：`version=0.2.74`、`connectivity=PASS`。基本面显示
+期望结果：`version=4.4.3`、`connectivity=PASS`。未配置合格 PIT 数据源时，基本面显示
 `UNSUPPORTED_SAFE_DEGRADE` 是正常状态，不代表行情异常。
 
 ## 2. 两种调用方式
@@ -197,7 +197,7 @@ printf '{"plan_id":"plan_xxx"}' |
 
 ## 8. 可选当前基本面
 
-SDK 0.2.74 没有 Longbridge 基本面接口。若配置 OpenAlice/TraderHub adapter：
+SDK 4.4.3 的基本面接口按能力探测；若配置 OpenAlice/TraderHub adapter：
 
 ```dotenv
 TRADINGCAT_OPENALICE_ADAPTER_COMMAND=/usr/local/bin/openalice-tradingcat-adapter

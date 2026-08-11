@@ -23,7 +23,7 @@ market:
     require_separate_credentials: ${TRADINGCAT_REQUIRE_SEPARATE_CREDENTIALS:-0}
 
   fundamentals:
-    primary: auto                       # SDK 0.2.74 无基本面接口；按能力探测并安全降级
+    primary: auto                       # SDK 基本面接口按能力探测并安全降级
     openalice_adapter_command: ${TRADINGCAT_OPENALICE_ADAPTER_COMMAND:-}
 
 database:

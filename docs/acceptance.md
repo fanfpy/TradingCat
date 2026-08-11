@@ -24,8 +24,8 @@ Agent 无关契约、研究可信性、个人投资者闭环和执行安全链�
 | Signal + Outbox | PASS | 同事务、幂等、回滚和失败重试 |
 | Core / executiond 边界 | PASS | 伪造审批、计划篡改、Proof 重放/过期全部拒绝 |
 | Live Canary 规则 | PASS | 范围、金额、次数、时效和 UNKNOWN 自动关闭 |
-| Longbridge SDK | PASS | 固定 0.2.74，Legacy API Key，AAPL 只读行情连通 |
-| 当前基本面 | SAFE DEGRADE | SDK 无 FundamentalContext；未配置外部 Provider 时明确缺失 |
+| Longbridge SDK | PASS | 固定 4.4.3，API Key，AAPL 只读行情连通 |
+| 当前基本面 | SAFE DEGRADE | SDK 能力按运行时探测；未配置合格 PIT Provider 时明确缺失 |
 | 历史基本面 | SAFE DEGRADE | 没有合格 PIT Provider，不生成或回填历史基本面因子 |
 | Longbridge Quant | OPTIONAL | 当前 CLI 无 quant；Native 最终验证不受影响 |
 | QwenPaw | UNCHANGED | 仍为独立 Agent；TradingCat 不修改其镜像或 Compose |
@@ -53,7 +53,7 @@ Agent 无关契约、研究可信性、个人投资者闭环和执行安全链�
 | Git 历史敏感信息检查 | PASS（未发现已知凭证模式） |
 | 无凭证全量测试 | PASS（164 passed） |
 | 无凭证 DRY_RUN 全链路 | PASS（12/12 phases） |
-| 离线 SDK 版本与能力检查 | PASS（longbridge 0.2.74） |
+| 离线 SDK 版本与能力检查 | PASS（longbridge 4.4.3） |
 | wheel / sdist 构建 | PASS |
 | wheel 独立安装及两个 CLI 入口 | PASS |
 | 制品内凭证、数据库和运行数据检查 | PASS |

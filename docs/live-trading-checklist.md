@@ -26,7 +26,7 @@
 - [ ] `python -m pytest -q` 全部通过。
 - [ ] `python e2e_full.py` 的 12 个阶段通过。
 - [ ] `python scripts/acceptance_v5.py` 返回 `automated_acceptance=PASS`。
-- [ ] SDK 诊断显示版本 0.2.74、只读行情 PASS。
+- [ ] SDK 诊断显示版本 4.4.3、只读行情 PASS。
 - [ ] DRY_RUN 计划、审批、Intent、部分成交、成交和对账状态机演练通过。
 - [ ] 计划篡改、ApprovalProof 重放/过期、账户非 SYNCED、订单 UNKNOWN 都被拒绝。
 
