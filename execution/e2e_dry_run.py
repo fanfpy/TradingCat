@@ -13,6 +13,7 @@
 """
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,7 +38,8 @@ def main() -> int:
     # 1. Signal → ExecutionPlan（NVDA 买入 10 股，8/7 收盘确认 223.96）
     plan = ExecutionPlan(
         plan_id="plan_nvda_001", account_id="default", execution_mode="DRY_RUN",
-        expires_at="2026-08-09T23:59:59Z",
+        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"),
         orders=[PlanOrder("1", "NVDA.US", "BUY", 10,
                           reference_price=223.96, reference_quote_at=now_utc(),
                           max_slippage_bps=50)])
@@ -89,7 +91,7 @@ def main() -> int:
     events = [l["event"] for l in logs]
     print(f"[8] Audit lineage: {events}")
 
-    print("\n✅ 端到端 dry-run 演练通过（未触达券商，全程 DRY_RUN）")
+    print("\n端到端 dry-run 演练通过（未触达券商，全程 DRY_RUN）")
     return 0
 
 

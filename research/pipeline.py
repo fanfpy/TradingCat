@@ -58,6 +58,27 @@ MANIFEST_FIELDS = ("source", "fetched_at", "last_completed",
                    "date_start", "date_end", "bar_count", "sha256")
 
 
+class HydrationRequiredError(RuntimeError):
+    """研究数据不得在 instrument metadata 未确认时进入缓存。"""
+
+    retryable = False
+
+
+def _client_source(client) -> tuple[str, str]:
+    return "longbridge", f"{type(client).__module__}.{type(client).__name__}"
+
+
+def _manifest_integrity(conn, symbol: str, manifest) -> tuple[bool, str]:
+    if manifest is None:
+        return False, "manifest_missing"
+    for field in MANIFEST_FIELDS:
+        if manifest[field] in (None, ""):
+            return False, f"manifest_missing:{field}"
+    if int(manifest["bar_count"] or 0) != len(dbm.get_bars(conn, symbol)):
+        return False, "manifest_bar_count_mismatch"
+    return True, "ok"
+
+
 # ────────────────────────────────────────────────────────────────
 # 候选池
 # ────────────────────────────────────────────────────────────────
@@ -70,6 +91,7 @@ def add_candidate(conn, symbol: str, security_service=None) -> str:
         if not result["ok"]:
             dbm.audit(conn, "SECURITY_METADATA_FAILED", "symbol", symbol,
                       result)
+            return f"未加入候选池（metadata 未确认）: {symbol}"
     if existing is None:
         dbm.set_lifecycle(conn, symbol, "candidate")
         return f"已加入候选池: {symbol}"
@@ -123,13 +145,25 @@ def sync_watchlist(conn, client=None) -> Dict:
             client = LongbridgeClient(scope="quote")
         lb_symbols = fetch_longbridge_watchlist(client=client, conn=conn)
     except Exception as exc:
+        dbm.audit(conn, "WATCHLIST_SYNC_FAILED", "watchlist", "longbridge",
+                  {"error_type": type(exc).__name__,
+                   "error_message": str(exc)[:500],
+                   "retryable": bool(getattr(exc, "retryable", False))})
         return {
             "ok": False,
             "error_type": type(exc).__name__,
             "error_message": str(exc),
             "retryable": bool(getattr(exc, "retryable", False)),
         }
+    source, source_version = _client_source(client)
+    sync_key = "watchlist:" + hashlib.sha256(
+        json.dumps(lb_symbols, ensure_ascii=False).encode()).hexdigest()
+    sync_run = dbm.begin_sync_run(
+        conn, "watchlist", source=source, source_version=source_version,
+        idempotency_key=sync_key)
     if not lb_symbols:
+        dbm.finish_sync_run(conn, sync_run["sync_id"], "SKIPPED",
+                            details={"status": "NO_DATA"})
         return {"ok": True, "status": "NO_DATA", "added": [],
                 "note": "长桥自选为空，未同步"}
 
@@ -149,10 +183,13 @@ def sync_watchlist(conn, client=None) -> Dict:
     skipped_other = []    # 其他状态（backtesting/candidate），保持
 
     from shared.security import SecurityService
-    metadata_results = SecurityService(conn, client).ensure_batch(
-        symbol for symbol in lb_symbols if symbol not in sys_set)
+    metadata_results = SecurityService(conn, client).ensure_batch(lb_symbols)
+    metadata_by_symbol = {item["symbol"]: item for item in metadata_results}
+    metadata_failures = [item for item in metadata_results if not item["ok"]]
 
     for s in lb_symbols:
+        if not metadata_by_symbol.get(s, {}).get("ok"):
+            continue
         if s not in sys_set:
             dbm.set_lifecycle(conn, s, "candidate")
             added.append(s)
@@ -175,6 +212,10 @@ def sync_watchlist(conn, client=None) -> Dict:
     for s in skipped_removed:
         removed_reasons[s] = _removed_reason(all_rows[s])
 
+    dbm.finish_sync_run(
+        conn, sync_run["sync_id"], "SYNCED" if not metadata_failures else "PARTIAL",
+        details={"count": len(lb_symbols), "metadata_failures": metadata_failures,
+                 "snapshot_id": snapshot_id})
     return {
         "ok": True,
         "lb_total": len(lb_symbols),
@@ -187,6 +228,10 @@ def sync_watchlist(conn, client=None) -> Dict:
         "not_in_lb_kept": sorted(not_in_lb),
         "universe_snapshot_id": snapshot_id,
         "metadata": metadata_results,
+        "metadata_failures": metadata_failures,
+        "sync_id": sync_run["sync_id"],
+        "source": source,
+        "source_version": source_version,
         "note": "added 已进候选池；removed 不重跑（见 reasons）；系统池不因长桥移除而删除",
     }
 
@@ -266,6 +311,10 @@ def prefilter(conn, symbol: str, bars: List[Dict]) -> Dict:
             # 生产数据错误通过新鲜度检查。
             manifest = dbm.get_manifest(conn, symbol)
             source = str(manifest["source"] or "") if manifest is not None else ""
+            manifest_ok, manifest_reason = _manifest_integrity(conn, symbol, manifest)
+            metrics["manifest"] = manifest_reason
+            if not manifest_ok:
+                reasons.append(manifest_reason)
             fresh, freshness_reason = completed_bar_freshness(
                 conn, symbol, last, as_of, source=source)
             metrics["freshness"] = freshness_reason
@@ -288,8 +337,15 @@ def prefilter(conn, symbol: str, bars: List[Dict]) -> Dict:
 def cache_bars(conn, symbol: str, rows: List[Dict], source: str,
                sha256: str, last_completed: str) -> int:
     """写入日线缓存 + 更新 manifest。"""
-    cnt = dbm.upsert_bars(conn, symbol, rows, source)
-    dates = [r["ts"] for r in rows]
+    if not rows:
+        raise ValueError(f"{symbol} 空行情不得写入缓存")
+    normalized = sorted(rows, key=lambda row: row["ts"])
+    if len({row["ts"] for row in normalized}) != len(normalized):
+        raise ValueError(f"{symbol} 行情包含重复日期")
+    if last_completed != normalized[-1]["ts"]:
+        raise ValueError(f"{symbol} last_completed 与数据末尾不一致")
+    cnt = dbm.upsert_bars(conn, symbol, normalized, source)
+    dates = [r["ts"] for r in normalized]
     simulated = source.lower() in {"test", "e2e", "synthetic", "simulation"}
     dbm.set_manifest(conn, symbol, {
         "source": source,
@@ -297,12 +353,16 @@ def cache_bars(conn, symbol: str, rows: List[Dict], source: str,
         "last_completed": last_completed,
         "date_start": dates[0] if dates else "",
         "date_end": dates[-1] if dates else "",
-        "bar_count": len(rows),
+        "bar_count": len(normalized),
         "sha256": sha256,
         # 前复权只说明供应商已调整价格，不等价于本地公司行为台账已逐条同步。
         "adjustment_mode": "TEST" if simulated else "FORWARD",
         "corporate_actions_status": "TEST" if simulated else "PROVIDER_ADJUSTED",
     })
+    dbm.audit(conn, "DATAHUB_CACHE", entity_type="symbol", entity_id=symbol,
+              payload={"source": source, "bar_count": len(normalized),
+                       "data_version": sha256, "last_completed": last_completed,
+                       "idempotent": True})
     return cnt
 
 
@@ -468,27 +528,71 @@ def cache_symbol(conn, symbol: str, count: int = 800, client=None) -> Dict:
     if client is None:
         from shared.longbridge_client import LongbridgeClient
         client = LongbridgeClient(scope="quote")
+    source, source_version = _client_source(client)
+    existing_manifest = dbm.get_manifest(conn, symbol)
+    sync_run = dbm.begin_sync_run(
+        conn, "bars", source=source, source_version=source_version,
+        idempotency_key=f"bars:{symbol}:{count}:"
+        f"{existing_manifest['sha256'] if existing_manifest else 'none'}")
     from shared.security import SecurityService
     metadata_result = SecurityService(conn, client).ensure_batch([symbol])[0]
     if not metadata_result["ok"]:
         dbm.audit(conn, "SECURITY_METADATA_FAILED", "symbol", symbol,
                   metadata_result)
+        dbm.finish_sync_run(
+            conn, sync_run["sync_id"], "FAILED",
+            error_type=metadata_result.get("error_type", "HydrationError"),
+            error_message=metadata_result.get("error_message", "UNKNOWN_METADATA"),
+            retryable=metadata_result.get("retryable", False),
+            details={"symbol": symbol, "stage": "metadata"})
+        raise HydrationRequiredError(
+            f"{symbol} metadata hydration failed: "
+            f"{metadata_result.get('error_message', 'UNKNOWN_METADATA')}")
 
     manifest = dbm.get_manifest(conn, symbol)
     if _manifest_complete(manifest):
         # 缓存完整 → 增量更新（P1 DataHub：只拉新 bar，不全量重拉）
-        result = incremental_update(conn, symbol, manifest, count=60, client=client)
+        try:
+            result = incremental_update(conn, symbol, manifest, count=60, client=client)
+        except Exception as exc:
+            dbm.finish_sync_run(
+                conn, sync_run["sync_id"], "FAILED", error_type=type(exc).__name__,
+                error_message=str(exc)[:500], retryable=bool(getattr(exc, "retryable", False)),
+                details={"symbol": symbol, "stage": "incremental"})
+            dbm.audit(conn, "DATAHUB_CACHE_FAILED", "symbol", symbol,
+                      {"stage": "incremental", "error_type": type(exc).__name__,
+                       "error_message": str(exc)[:500]})
+            raise
         result["metadata"] = metadata_result
+        dbm.finish_sync_run(conn, sync_run["sync_id"], "SYNCED", details=result)
         return result
 
-    _reserve_longbridge(conn, "kline")
-    klines = client.kline_by_count(symbol, count=count, period="day")
+    try:
+        _reserve_longbridge(conn, "kline")
+        klines = client.kline_by_count(symbol, count=count, period="day")
+    except Exception as exc:
+        dbm.finish_sync_run(
+            conn, sync_run["sync_id"], "FAILED", error_type=type(exc).__name__,
+            error_message=str(exc)[:500], retryable=bool(getattr(exc, "retryable", False)),
+            details={"symbol": symbol, "stage": "kline"})
+        dbm.audit(conn, "DATAHUB_CACHE_FAILED", "symbol", symbol,
+                  {"stage": "kline", "error_type": type(exc).__name__,
+                   "error_message": str(exc)[:500]})
+        raise
 
     if not klines:
+        dbm.finish_sync_run(
+            conn, sync_run["sync_id"], "FAILED", error_type="EmptyData",
+            error_message=f"{symbol} returned 0 bars",
+            details={"symbol": symbol, "stage": "kline"})
         raise RuntimeError(f"长桥返回 {symbol} 0 根K线（行情权限或网络问题）")
 
     rows = _normalize_rows(klines)
     if len(rows) < MIN_RESEARCH_BARS:
+        dbm.finish_sync_run(
+            conn, sync_run["sync_id"], "FAILED", error_type="InsufficientData",
+            error_message=f"{symbol} bars={len(rows)}<{MIN_RESEARCH_BARS}",
+            details={"symbol": symbol, "stage": "validation", "bar_count": len(rows)})
         raise RuntimeError(
             f"{symbol} 日线不足研究所需 {MIN_RESEARCH_BARS} 根（实际 {len(rows)}），未写入缓存")
 
@@ -497,7 +601,7 @@ def cache_symbol(conn, symbol: str, count: int = 800, client=None) -> Dict:
     sha = _rows_sha256(rows)
     cache_bars(conn, symbol, rows, source="longbridge",
                sha256=sha, last_completed=rows[-1]["ts"])
-    return {
+    result = {
         "symbol": symbol,
         "bar_count": len(rows),
         "date_start": rows[0]["ts"],
@@ -506,6 +610,8 @@ def cache_symbol(conn, symbol: str, count: int = 800, client=None) -> Dict:
         "source": "longbridge",
         "metadata": metadata_result,
     }
+    dbm.finish_sync_run(conn, sync_run["sync_id"], "SYNCED", details=result)
+    return result
 
 
 # ────────────────────────────────────────────────────────────────

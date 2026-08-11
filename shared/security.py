@@ -6,6 +6,7 @@ from shared import db as dbm
 
 
 UNKNOWN_METADATA = "UNKNOWN_METADATA"
+MAX_PROVIDER_ATTEMPTS = 2
 
 
 class UnknownSecurityMetadataError(ValueError):
@@ -72,7 +73,23 @@ class SecurityService:
         if self.provider is None:
             raise UnknownSecurityMetadataError(f"UNKNOWN_METADATA: {symbol}")
 
-        metadata = self._validate(symbol, self.provider.static_info(symbol))
+        metadata = None
+        last_exc = None
+        for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
+            try:
+                metadata = self._validate(symbol, self.provider.static_info(symbol))
+                break
+            except Exception as exc:
+                last_exc = exc
+                # Validation/identity failures are deterministic and must never be
+                # retried. Provider exceptions may opt into one bounded retry.
+                if not bool(getattr(exc, "retryable", False)) or attempt >= MAX_PROVIDER_ATTEMPTS:
+                    raise
+        if metadata is None and last_exc is not None:
+            raise last_exc
+        metadata_version = str(
+            metadata.get("metadata_version") or metadata.get("version") or
+            metadata.get("updated_at") or "unknown")
         dbm.upsert_security(
             self.core, metadata["symbol"], metadata["name"],
             metadata["exchange"], metadata["currency"], aliases=[symbol],
@@ -81,6 +98,7 @@ class SecurityService:
             beta=float(metadata.get("beta", 1.0)),
             leverage=float(metadata.get("leverage", 1.0)),
             lot_size=metadata.get("lot_size"),
+            metadata_source="provider", metadata_version=metadata_version,
         )
         stored = self.cached(symbol)
         if stored is None:
@@ -101,6 +119,9 @@ class SecurityService:
                 results.append({"symbol": symbol, "ok": True,
                                 "metadata": metadata})
             except Exception as exc:
+                dbm.record_security_failure(
+                    self.core, symbol, type(exc).__name__, str(exc),
+                    retryable=bool(getattr(exc, "retryable", False)))
                 results.append({
                     "symbol": symbol,
                     "ok": False,

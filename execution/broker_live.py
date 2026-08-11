@@ -32,6 +32,7 @@ DRY_RUN / LIVE 演练：
 接实盘前必读：docs/live-trading-checklist.md（铁律：TradingCat 不会自动接 LIVE）。
 """
 
+import os
 import sys
 import uuid
 from collections import deque
@@ -43,6 +44,7 @@ from typing import Dict, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared import db as dbm
+from execution.models import APPROVAL_PROOF_CHANNEL
 
 
 # ────────────────────────────────────────────────────────────────
@@ -90,12 +92,23 @@ class LiveBroker:
 
     def __init__(self, conn, client=None, enable_live: bool = False,
                  account_id: str = "default", event_handler=None,
-                 enable_order_queries: bool = False):
+                 enable_order_queries: bool = False,
+                 kill_switch_engaged: Optional[bool] = None):
         self.conn = conn
         self.client = client                    # 测试注入 mock；None → 懒加载真实客户端
         self.enable_live = bool(enable_live)    # 默认 False = DRY_RUN（铁律）
         self.enable_order_queries = bool(enable_order_queries)
         self.account_id = account_id
+        # 真实客户端默认保持 kill switch；生产运维必须显式设置
+        # TRADINGCAT_LIVE_KILL_SWITCH=0 才能解锁。注入 client 是测试/演练 seam，
+        # 仍可通过显式 kill_switch_engaged=True 覆盖。
+        env_switch = os.getenv("TRADINGCAT_LIVE_KILL_SWITCH")
+        if kill_switch_engaged is not None:
+            self.kill_switch_engaged = bool(kill_switch_engaged)
+        elif env_switch is not None:
+            self.kill_switch_engaged = env_switch.strip().lower() not in ("0", "false", "off", "no")
+        else:
+            self.kill_switch_engaged = client is None
         if event_handler is None and (self.enable_live or self.enable_order_queries):
             from execution.broker import BrokerEventHandler
             event_handler = BrokerEventHandler(conn)
@@ -149,12 +162,32 @@ class LiveBroker:
         if plan.execution_mode != "LIVE":
             raise LiveBrokerSafetyError(
                 f"plan execution_mode={plan.execution_mode}：LiveBroker 只接受 LIVE 计划")
+        if (confirmation.approval_channel != APPROVAL_PROOF_CHANNEL
+                or row["approval_channel"] != APPROVAL_PROOF_CHANNEL):
+            raise LiveBrokerSafetyError(
+                "LIVE 必须使用已验证的 ApprovalProof；旧 CLI/string APPROVED 被拒绝")
         if self.enable_live:
+            if self.kill_switch_engaged:
+                raise LiveBrokerSafetyError("LIVE kill switch 已 engaged，拒绝真实提交")
             if row["status"] != "CONSUMED":
                 raise LiveBrokerSafetyError(
                     f"confirmation 状态 {row['status']} != CONSUMED："
                     "LIVE 提交必须经 OrderManager.consume 原子消费链"
                     "（APPROVED 未消费 = 绕过链直通 = 拒绝）")
+            stored = dbm.get_intent_by_request_id(
+                self.conn, str(intent.get("client_request_id", "")))
+            if stored is None:
+                raise LiveBrokerSafetyError("LIVE 提交的 client_request_id 不存在，拒绝陌生订单")
+            if (stored["plan_id"] != plan.plan_id
+                    or stored["plan_order_id"] != intent.get("plan_order_id")
+                    or stored["confirmation_id"] != confirmation.confirmation_id
+                    or stored["symbol"] != intent.get("symbol")
+                    or stored["side"] != intent.get("side")
+                    or abs(float(stored["quantity"]) - float(intent.get("quantity", 0))) > 1e-9):
+                raise LiveBrokerSafetyError("LIVE intent 与已消费 ExecutionPlan 不匹配")
+            if stored["status"] not in ("PENDING", "SUBMITTING"):
+                raise LiveBrokerSafetyError(
+                    f"LIVE intent 状态 {stored['status']} 不允许提交（防止重复下单）")
             dbm.authorize_live_canary(
                 self.conn, account_id=plan.account_id, plan_id=plan.plan_id,
                 client_request_id=str(intent.get("client_request_id", "")),
@@ -448,7 +481,9 @@ class LiveBroker:
 # ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from execution.models import ExecutionPlan, PlanOrder, Confirmation, now_utc
+    from execution.models import (
+        APPROVAL_PROOF_CHANNEL, ExecutionPlan, PlanOrder, Confirmation, now_utc,
+    )
     from execution.order_manager import ConfirmationService, ApprovalAdapter, OrderManager
 
     conn = dbm.get_execution_conn(":memory:")
@@ -467,35 +502,31 @@ if __name__ == "__main__":
 
     fake = _FakeClient()
     plan = ExecutionPlan(
-        plan_id="p_smoke", account_id="default", execution_mode="LIVE",
+        plan_id="p_smoke", account_id="default", execution_mode="DRY_RUN",
         expires_at="2099-01-01T00:00:00Z",
         orders=[PlanOrder("1", "NVDA.US", "BUY", 10, reference_price=223.96)])
     svc = ConfirmationService(conn)
     approved = ApprovalAdapter(conn, channel="cli").approve(
         svc.create(plan).confirmation_id, approved_by="owner", nonce="smoke_1")
 
-    # DRY_RUN 默认：不触网
-    dry = LiveBroker(conn, client=fake, enable_live=False)
-    intent = {"client_request_id": "cr_x", "plan_id": "p_smoke", "plan_order_id": "1",
-              "symbol": "NVDA.US", "side": "BUY", "quantity": 10, "status": "PENDING"}
-    ack = dry.submit(intent, confirmation=approved, plan=plan)
-    assert ack.status == "DRY_RUN_SUBMITTED" and fake.calls == []
-    print(f"DRY_RUN 演练通过：{ack}（未触达券商）")
+    # DRY_RUN 默认：不触网；LiveBroker 只接受 LIVE 计划，DRY_RUN 由
+    # OrderManager 在本地消费，避免模式落入错误路由。
+    created = OrderManager(conn).submit(plan, approved)
+    assert len(created) == 1 and fake.calls == []
+    print("DRY_RUN 演练通过（未触达券商）")
 
-    # LIVE：经 OrderManager.consume 链后提交
-    live = LiveBroker(conn, client=fake, enable_live=True)
-    om = OrderManager(conn, broker=live)
-    created = om.submit(plan, approved)
-    assert len(fake.calls) == 1 and fake.calls[0]["symbol"] == "NVDA.US"
-    print(f"LIVE 演练通过：{fake.calls[0]}")
-
-    # 直通防护：未消费的 APPROVED confirmation 直接提交 → 拒绝
+    # LIVE 的旧 CLI APPROVED 直通 → 拒绝；没有 proof 不得触发 broker。
     plan2 = ExecutionPlan(
         plan_id="p_smoke2", account_id="default", execution_mode="LIVE",
         expires_at="2099-01-01T00:00:00Z",
         orders=[PlanOrder("1", "NVDA.US", "BUY", 10, reference_price=223.96)])
     approved2 = ApprovalAdapter(conn, channel="cli").approve(
         svc.create(plan2).confirmation_id, approved_by="owner", nonce="smoke_2")
+    live = LiveBroker(conn, client=fake, enable_live=True,
+                      kill_switch_engaged=False)
+    intent = {"client_request_id": "cr_x", "plan_id": "p_smoke2", "plan_order_id": "1",
+              "symbol": "NVDA.US", "side": "BUY", "quantity": 10,
+              "reference_price": 223.96, "status": "PENDING"}
     before = len(fake.calls)
     try:
         live.submit(intent, confirmation=approved2, plan=plan2)
@@ -503,4 +534,4 @@ if __name__ == "__main__":
     except LiveBrokerSafetyError:
         pass
     assert len(fake.calls) == before, "直通提交不应触达券商"
-    print("直通防护通过 ✅（未消费 APPROVED confirmation 被拒绝，未触网）")
+    print("直通防护通过（未消费 APPROVED confirmation 被拒绝，未触网）")

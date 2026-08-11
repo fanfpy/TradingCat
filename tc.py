@@ -11,7 +11,7 @@ tc — TradingCat 统一命令入口（对齐 OpenAlice CLI-first 设计）
     tc monitor ...   盘前/盘中/盘后监控（monitor.py，--scope watchlist 读订阅清单）
     tc position ...  仓位计算（position.py）
     tc risk ...      组合风控（portfolio_risk.py）
-    tc trade ...     下单（保留二次确认，dry-run 默认）
+    tc trade ...     下单（DRY_RUN/PAPER；LIVE 仅创建待审批计划）
 
 设计原则：
     1. 薄封装：不重写逻辑，只做入口统一 + --json 输出规范
@@ -30,7 +30,7 @@ tc — TradingCat 统一命令入口（对齐 OpenAlice CLI-first 设计）
     tc execution reconcile
     tc strategy list
     tc backup daily
-    tc trade order --symbol GLD.US --qty 10 --mode DRY_RUN   # 交互式确认后走 Execution 安全链
+    tc trade order --symbol GLD.US --qty 10 --mode PAPER    # 本地纸面交易，不触网
 """
 
 import argparse
@@ -459,6 +459,7 @@ def _build_plan(conn, symbol: str, qty: float, mode: str, quote_provider,
     import uuid
     from execution.models import ExecutionPlan, PlanOrder, now_utc
     from execution.order_manager import ConfirmationService
+    from execution.persistence import insert_plan
 
     plan_id = f"plan_{uuid.uuid4().hex[:10]}"
     ref_price, ref_at = quote_provider(conn, symbol)
@@ -468,8 +469,8 @@ def _build_plan(conn, symbol: str, qty: float, mode: str, quote_provider,
     plan = ExecutionPlan(plan_id=plan_id, account_id="default",
                          execution_mode=mode, expires_at=_plan_expiry(),
                          orders=[order])
-    dbm.insert_plan(conn, plan.plan_id, plan.account_id, plan.execution_mode,
-                    plan.expires_at, plan.plan_hash, [order.to_dict()])
+    insert_plan(conn, plan.plan_id, plan.account_id, plan.execution_mode,
+                plan.expires_at, plan.plan_hash, [order.to_dict()])
     svc = ConfirmationService(conn, execution_conn)
     cfm = svc.create(plan)
     return plan, cfm
@@ -487,6 +488,7 @@ def _post_approval(conn, plan, approved, quote_provider, broker=None,
     from execution.models import MarketState, now_utc
     from execution.pretrade_risk import evaluate as pretrade_evaluate
     from execution.order_manager import OrderManager
+    from execution.paper_broker import PaperBroker
 
     # 为 PTR 构造 MarketState：重新取行情（D-8：参考价 vs 当前市场价校验 slippage）
     states = {}
@@ -516,9 +518,14 @@ def _post_approval(conn, plan, approved, quote_provider, broker=None,
     if plan.execution_mode == "LIVE" and broker is None:
         print("[拒绝] LIVE 缺少已显式启用的 broker（零 OrderIntent）。")
         return 1, []
+    if plan.execution_mode == "PAPER":
+        if broker is not None and not isinstance(broker, PaperBroker):
+            print("[拒绝] PAPER 只能使用本地 PaperBroker，禁止串入其他路由器。")
+            return 1, []
+        broker = PaperBroker(execution_conn)
     om = OrderManager(execution_conn, broker=broker)
     try:
-        if plan.execution_mode == "LIVE":
+        if plan.execution_mode in ("PAPER", "LIVE"):
             created = om.submit(
                 plan, approved, market_states=states,
                 account_state=load_account(conn),
@@ -642,7 +649,11 @@ def _run_trade_order(conn, symbol: str, qty: float, mode: str,
     if rc != 0:
         return rc
 
-    result_mode = "LIVE 已提交券商" if mode == "LIVE" else "DRY_RUN，未触达券商"
+    result_mode = {
+        "LIVE": "LIVE 已提交券商",
+        "PAPER": "PAPER 本地纸面路由，未触网",
+        "DRY_RUN": "DRY_RUN，未触达券商",
+    }[mode]
     print(f"[成功] {len(created)} 个 OrderIntent 已创建（{result_mode}）：")
     for c in created:
         print(f"  - {c['client_request_id']} {c['symbol']} {c['side']} {c['quantity']} "
@@ -801,7 +812,7 @@ def main():
     p_portfolio = sub.add_parser("portfolio", help="目标组合构建")
     portfolio_sub = p_portfolio.add_subparsers(dest="portfolio_cmd", required=True)
     p_build = portfolio_sub.add_parser("build", help="运行 SIG→SIZE→TP→PR→EP")
-    p_build.add_argument("--mode", choices=["DRY_RUN", "LIVE"], default="DRY_RUN")
+    p_build.add_argument("--mode", choices=["DRY_RUN", "PAPER", "LIVE"], default="DRY_RUN")
     p_build.add_argument("--dry-run", action="store_true", help="强制 DRY_RUN")
     p_build.add_argument("--equity", type=_positive_float, default=None,
                          help="账户 NAV 不可用时显式提供权益（仅建议/DRY_RUN）")
@@ -813,8 +824,8 @@ def main():
     t_order.add_argument("--symbol", required=True)
     t_order.add_argument("--qty", type=_positive_float, required=True,
                          help="数量（必须 > 0）")
-    t_order.add_argument("--mode", choices=["DRY_RUN", "LIVE"], default="DRY_RUN",
-                         help="DRY_RUN 默认（不触达券商）")
+    t_order.add_argument("--mode", choices=["DRY_RUN", "PAPER", "LIVE"], default="DRY_RUN",
+                         help="DRY_RUN 默认；PAPER 仅本地纸面路由，不触达券商")
     t_order.add_argument("--enable-live", action="store_true",
                          help="显式解锁 LIVE；仍需交互确认和精确短语")
     t_plan = t_sub.add_parser("plan", help="确认并执行已持久化的同一个 ExecutionPlan")

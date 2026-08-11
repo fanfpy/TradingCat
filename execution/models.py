@@ -22,6 +22,10 @@ from typing import Dict, List, Optional
 
 from datetime import datetime, timezone
 
+
+EXECUTION_MODES = ("DRY_RUN", "PAPER", "LIVE")
+APPROVAL_PROOF_CHANNEL = "approval-proof"
+
 # ────────────────────────────────────────────────────────────────
 # 时间工具
 # ────────────────────────────────────────────────────────────────
@@ -64,13 +68,13 @@ class PlanOrder:
 class ExecutionPlan:
     plan_id: str
     account_id: str
-    execution_mode: str          # DRY_RUN|LIVE
+    execution_mode: str          # DRY_RUN|PAPER|LIVE
     expires_at: str
     orders: tuple[PlanOrder, ...]
     plan_hash: str = ""
 
     def __post_init__(self) -> None:
-        assert self.execution_mode in ("DRY_RUN", "LIVE"), f"非法 execution_mode: {self.execution_mode}"
+        assert self.execution_mode in EXECUTION_MODES, f"非法 execution_mode: {self.execution_mode}"
         object.__setattr__(self, "orders", tuple(self.orders))
         # frozen dataclass 下用 object.__setattr__ 计算不可变 hash
         object.__setattr__(self, "plan_hash", compute_plan_hash(
@@ -79,7 +83,8 @@ class ExecutionPlan:
             self.expires_at))
 
     def is_expired(self, at: Optional[str] = None) -> bool:
-        return parse_ts(self.expires_at) < parse_ts(at or now_utc())
+        # 到期瞬间即失效；不能让同一秒的计划在边界条件下继续提交。
+        return parse_ts(self.expires_at) <= parse_ts(at or now_utc())
 
     def to_dict(self) -> Dict:
         return {

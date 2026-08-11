@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from execution.models import ExecutionPlan, PlanOrder, now_utc
+from execution.persistence import insert_plan
 from production.monitor import post_market_check
 from production.portfolio_risk import PositionPlan
 from production.position import KellyPositionSizer, PositionIntent
@@ -203,7 +204,7 @@ def target_to_execution_plan(conn, tp: TargetPortfolio, equity: float,
                              account_id: str = "default", mode: str = "DRY_RUN",
                              account_state=None) -> Optional[ExecutionPlan]:
     """把目标权重转换成相对真实持仓和挂单的差额订单，并持久化不可变 Plan。"""
-    if mode not in ("DRY_RUN", "LIVE"):
+    if mode not in ("DRY_RUN", "PAPER", "LIVE"):
         raise ValueError(f"非法 execution mode: {mode}")
     current = {p.get("symbol", ""): float(p.get("quantity", 0) or 0)
                for p in _positions(account_state, conn)}
@@ -252,8 +253,12 @@ def target_to_execution_plan(conn, tp: TargetPortfolio, equity: float,
         plan_id=f"plan_{uuid.uuid4().hex[:12]}", account_id=account_id,
         execution_mode=mode, expires_at=expires_at, orders=tuple(orders),
     )
-    dbm.insert_plan(conn, plan.plan_id, account_id, mode, expires_at, plan.plan_hash,
-                    [order.to_dict() for order in orders])
+    insert_plan(conn, plan.plan_id, account_id, mode, expires_at, plan.plan_hash,
+                [order.to_dict() for order in orders])
+    dbm.audit(conn, "EXECUTION_PLAN_CREATED", entity_type="plan", entity_id=plan.plan_id,
+              payload={"plan": plan.to_dict(), "equity": equity,
+                       "account_sync_status": getattr(account_state, "sync_status", None),
+                       "target_portfolio_passed": tp.passed})
     from production.notification import safe_notify
     safe_notify(
         conn, "execution_plan.created", f"ExecutionPlan {plan.plan_id} 待审批",

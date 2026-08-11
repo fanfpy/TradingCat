@@ -24,6 +24,7 @@ from execution.models import Confirmation
 from execution.order_manager import ApprovalAdapter
 from execution.broker import BrokerEventHandler
 from execution.broker_live import LiveBroker
+from execution.order_router import LongbridgeRouter
 from tc import _build_plan, _fetch_quote, _post_approval, _positive_float, _run_trade_order
 
 
@@ -79,6 +80,41 @@ def test_reject_path_n_zero_intent(conn):
     rows = conn.execute("SELECT * FROM trading_confirmation").fetchall()
     assert len(rows) == 1
     assert rows[0]["status"] == "CANCELLED"
+
+
+def test_paper_cli_success_uses_local_paper_broker(conn):
+    rc = _run_trade_order(conn, "NVDA.US", 10, "PAPER",
+                          confirm_input=lambda: True, quote_provider=provider())
+
+    assert rc == 0
+    intent = dbm.list_intents(conn)[0]
+    assert intent["status"] == "SUBMITTED"
+    assert intent["broker_order_id"].startswith("paper_")
+    assert any(row["event"] == "BROKER_PAPER_SUBMIT"
+               for row in dbm.get_audit(conn))
+    assert dbm.get_confirmation(conn, intent["confirmation_id"])["status"] == "CONSUMED"
+
+
+def test_paper_cli_never_constructs_or_calls_longbridge(monkeypatch, conn):
+    class ExplodingLongbridge:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("PAPER 不得构造 LongbridgeClient")
+
+    monkeypatch.setattr("shared.longbridge_client.LongbridgeClient", ExplodingLongbridge)
+    rc = _run_trade_order(conn, "NVDA.US", 10, "PAPER",
+                          confirm_input=lambda: True, quote_provider=provider())
+
+    assert rc == 0
+    assert dbm.list_intents(conn)[0]["broker_order_id"].startswith("paper_")
+
+
+def test_paper_cli_rejects_longbridge_router_injection(conn):
+    rc = _run_trade_order(
+        conn, "NVDA.US", 10, "PAPER", confirm_input=lambda: True,
+        quote_provider=provider(), broker=LongbridgeRouter(enable_live=True))
+
+    assert rc != 0
+    assert dbm.list_intents(conn) == []
 
 
 # ────────────────────────────────────────────────────────────────

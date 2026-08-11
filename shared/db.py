@@ -131,8 +131,68 @@ CREATE TABLE IF NOT EXISTS trading_account (
     buying_power REAL,
     nav          REAL,
     updated_at   TEXT NOT NULL,
-    raw_json     TEXT
+    raw_json     TEXT,
+    source       TEXT NOT NULL DEFAULT 'unknown',
+    source_version TEXT NOT NULL DEFAULT 'unknown',
+    last_success_at TEXT,
+    last_attempt_at TEXT,
+    last_error_type TEXT,
+    last_error_message TEXT,
+    last_error_retryable INTEGER NOT NULL DEFAULT 0,
+    snapshot_version TEXT
 );
+
+-- Broker snapshot is append-by-sync-id and replace-by-(account,symbol): the latest
+-- snapshot is restart-safe while sync_runs retains the immutable audit trail.
+CREATE TABLE IF NOT EXISTS account_position_snapshot (
+    account_id   TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    quantity     REAL NOT NULL,
+    cost_price   REAL,
+    last_price   REAL,
+    raw_json     TEXT NOT NULL,
+    metadata_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+    metadata_source TEXT NOT NULL DEFAULT 'unknown',
+    metadata_version TEXT NOT NULL DEFAULT 'unknown',
+    metadata_error TEXT,
+    observed_at  TEXT NOT NULL,
+    sync_id      TEXT NOT NULL,
+    PRIMARY KEY (account_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_account_position_sync
+    ON account_position_snapshot(account_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS account_order_snapshot (
+    account_id   TEXT NOT NULL,
+    order_key    TEXT NOT NULL,
+    symbol       TEXT,
+    side         TEXT,
+    quantity     REAL,
+    status       TEXT,
+    raw_json     TEXT NOT NULL,
+    observed_at  TEXT NOT NULL,
+    sync_id      TEXT NOT NULL,
+    PRIMARY KEY (account_id, order_key)
+);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    sync_id       TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    domain        TEXT NOT NULL,
+    account_id    TEXT,
+    source        TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    status        TEXT NOT NULL, -- RUNNING|SYNCED|PARTIAL|FAILED|SKIPPED
+    attempt       INTEGER NOT NULL DEFAULT 1,
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT,
+    error_type    TEXT,
+    error_message TEXT,
+    retryable     INTEGER NOT NULL DEFAULT 0,
+    details_json  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sync_runs_domain
+    ON sync_runs(domain, account_id, started_at);
 
 -- UniverseSnapshot（D-5 防幸存者偏差 / quota 管理；记录每标的进入 universe 的时间与状态）
 CREATE TABLE IF NOT EXISTS trading_universe (
@@ -461,7 +521,19 @@ CREATE TABLE IF NOT EXISTS security_master (
     lot_size     INTEGER,
     aliases_json TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'ACTIVE',
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+    metadata_source TEXT NOT NULL DEFAULT 'unknown',
+    metadata_version TEXT NOT NULL DEFAULT 'unknown',
+    last_error_type TEXT,
+    last_error_message TEXT
+);
+CREATE TABLE IF NOT EXISTS security_metadata_failures (
+    failure_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    error_type TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    retryable INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS watchlist_item (
@@ -507,7 +579,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_investor_policy_hash
     ON investor_policy(account_id, config_hash);
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -523,6 +595,18 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     """
     if not _has_column(conn, "trading_account", "nav"):
         conn.execute("ALTER TABLE trading_account ADD COLUMN nav REAL")
+    for column, definition in (
+        ("source", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("source_version", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("last_success_at", "TEXT"),
+        ("last_attempt_at", "TEXT"),
+        ("last_error_type", "TEXT"),
+        ("last_error_message", "TEXT"),
+        ("last_error_retryable", "INTEGER NOT NULL DEFAULT 0"),
+        ("snapshot_version", "TEXT"),
+    ):
+        if not _has_column(conn, "trading_account", column):
+            conn.execute(f"ALTER TABLE trading_account ADD COLUMN {column} {definition}")
     if not _has_column(conn, "strategy_version", "oos_stats_json"):
         conn.execute("ALTER TABLE strategy_version ADD COLUMN oos_stats_json TEXT")
     if not _has_column(conn, "trading_order_intent", "strategy_version_id"):
@@ -547,6 +631,14 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE security_master ADD COLUMN leverage REAL NOT NULL DEFAULT 1.0")
     if not _has_column(conn, "security_master", "lot_size"):
         conn.execute("ALTER TABLE security_master ADD COLUMN lot_size INTEGER")
+    for column, definition in (
+        ("metadata_source", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("metadata_version", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("last_error_type", "TEXT"),
+        ("last_error_message", "TEXT"),
+    ):
+        if not _has_column(conn, "security_master", column):
+            conn.execute(f"ALTER TABLE security_master ADD COLUMN {column} {definition}")
     conn.execute(
         "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, _now()),
@@ -1325,19 +1417,38 @@ def upsert_security(conn: sqlite3.Connection, symbol: str, name: str,
                     exchange: str, currency: str,
                     aliases: Optional[List[str]] = None, *, sector: str = "UNKNOWN",
                     asset_type: str = "EQUITY", beta: float = 1.0,
-                    leverage: float = 1.0, lot_size: Optional[int] = None) -> None:
+                    leverage: float = 1.0, lot_size: Optional[int] = None,
+                    metadata_source: str = "unknown",
+                    metadata_version: str = "unknown") -> None:
     conn.execute(
         "INSERT INTO security_master(symbol,name,exchange,currency,sector,asset_type,beta,"
-        "leverage,lot_size,aliases_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+        "leverage,lot_size,aliases_json,updated_at,metadata_source,metadata_version) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name,"
         "exchange=excluded.exchange,currency=excluded.currency,"
         "sector=excluded.sector,asset_type=excluded.asset_type,beta=excluded.beta,"
         "leverage=excluded.leverage,lot_size=excluded.lot_size,"
-        "aliases_json=excluded.aliases_json,updated_at=excluded.updated_at",
+        "aliases_json=excluded.aliases_json,updated_at=excluded.updated_at,"
+        "metadata_source=excluded.metadata_source,metadata_version=excluded.metadata_version,"
+        "last_error_type=NULL,last_error_message=NULL",
         (symbol.upper(), name, exchange.upper(), currency.upper(), sector.upper(),
          asset_type.upper(), float(beta), float(leverage),
          int(lot_size) if lot_size is not None else None,
-         json.dumps(sorted(set(aliases or [])), ensure_ascii=False), _now()),
+         json.dumps(sorted(set(aliases or [])), ensure_ascii=False), _now(),
+         metadata_source, metadata_version),
+    )
+    conn.commit()
+
+
+def record_security_failure(conn: sqlite3.Connection, symbol: str,
+                            error_type: str, error_message: str,
+                            retryable: bool = False) -> None:
+    """保留 metadata hydration 失败，即使 security_master 尚无该标的。"""
+    symbol = symbol.upper()
+    conn.execute(
+        "INSERT INTO security_metadata_failures(symbol,error_type,error_message,"
+        "retryable,observed_at) VALUES(?,?,?,?,?)",
+        (symbol, error_type, error_message[:500], int(retryable), _now()),
     )
     conn.commit()
 
@@ -1756,14 +1867,29 @@ ACCOUNT_SYNC_STATUSES = ("SYNCED", "STALE", "RECONCILING", "MISMATCH", "UNKNOWN"
 
 def upsert_account(conn: sqlite3.Connection, account_id: str, sync_status: str,
                    cash: Optional[float] = None, buying_power: Optional[float] = None,
-                   raw_json: Optional[str] = None, nav: Optional[float] = None) -> None:
+                   raw_json: Optional[str] = None, nav: Optional[float] = None,
+                   *, source: str = "unknown", source_version: str = "unknown",
+                   snapshot_version: Optional[str] = None,
+                   observed_at: Optional[str] = None) -> None:
     if sync_status not in ACCOUNT_SYNC_STATUSES:
         raise ValueError(f"非法 sync_status: {sync_status}")
+    now = observed_at or _now()
     conn.execute(
-        "INSERT OR REPLACE INTO trading_account "
-        "(account_id, sync_status, cash, buying_power, nav, updated_at, raw_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (account_id, sync_status, cash, buying_power, nav, _now(), raw_json),
+        "INSERT INTO trading_account "
+        "(account_id, sync_status, cash, buying_power, nav, updated_at, raw_json, "
+        " source, source_version, last_success_at, last_attempt_at, snapshot_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(account_id) DO UPDATE SET sync_status=excluded.sync_status, "
+        "cash=excluded.cash, buying_power=excluded.buying_power, nav=excluded.nav, "
+        "updated_at=excluded.updated_at, raw_json=excluded.raw_json, "
+        "source=excluded.source, source_version=excluded.source_version, "
+        "last_success_at=CASE WHEN excluded.sync_status IN ('SYNCED','MISMATCH') "
+        "THEN excluded.last_success_at ELSE trading_account.last_success_at END, "
+        "last_attempt_at=excluded.last_attempt_at, "
+        "snapshot_version=COALESCE(excluded.snapshot_version, trading_account.snapshot_version)",
+        (account_id, sync_status, cash, buying_power, nav, now, raw_json,
+         source, source_version, now if sync_status == "SYNCED" else None,
+         now, snapshot_version),
     )
     conn.commit()
 
@@ -1772,14 +1898,22 @@ def get_account(conn: sqlite3.Connection, account_id: str = "default") -> Option
     return conn.execute("SELECT * FROM trading_account WHERE account_id = ?", (account_id,)).fetchone()
 
 
-def set_account_sync_status(conn: sqlite3.Connection, account_id: str, sync_status: str) -> None:
-    """单独更新 sync_status（保留 cash/buying_power）。行不存在则插入（upsert 语义）。"""
+def set_account_sync_status(conn: sqlite3.Connection, account_id: str, sync_status: str,
+                            *, error_type: Optional[str] = None,
+                            error_message: Optional[str] = None,
+                            retryable: bool = False) -> None:
+    """更新状态但不伪造快照新鲜度；失败原因留在账户快照和 audit。"""
     if sync_status not in ACCOUNT_SYNC_STATUSES:
         raise ValueError(f"非法 sync_status: {sync_status}")
+    now = _now()
     conn.execute(
-        "INSERT INTO trading_account (account_id, sync_status, updated_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(account_id) DO UPDATE SET sync_status = excluded.sync_status, updated_at = excluded.updated_at",
-        (account_id, sync_status, _now()),
+        "INSERT INTO trading_account (account_id, sync_status, updated_at, last_attempt_at, "
+        "last_error_type, last_error_message, last_error_retryable) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(account_id) DO UPDATE SET sync_status=excluded.sync_status, "
+        "last_attempt_at=excluded.last_attempt_at, last_error_type=excluded.last_error_type, "
+        "last_error_message=excluded.last_error_message, "
+        "last_error_retryable=excluded.last_error_retryable",
+        (account_id, sync_status, now, now, error_type, error_message, int(retryable)),
     )
     conn.commit()
 
@@ -1789,6 +1923,130 @@ def set_account_updated_at(conn: sqlite3.Connection, account_id: str,
     conn.execute("UPDATE trading_account SET updated_at=? WHERE account_id=?",
                  (updated_at, account_id))
     conn.commit()
+
+
+def begin_sync_run(conn: sqlite3.Connection, domain: str, *,
+                   account_id: Optional[str] = None,
+                   source: str = "unknown", source_version: str = "unknown",
+                   idempotency_key: Optional[str] = None,
+                   attempt: int = 1) -> Dict:
+    """创建可重入同步运行记录；相同幂等键不会产生第二个运行。"""
+    key = idempotency_key or f"{domain}:{account_id or '-'}:{_now()}"
+    existing = conn.execute(
+        "SELECT * FROM sync_runs WHERE idempotency_key=?", (key,)).fetchone()
+    if existing is not None:
+        return dict(existing)
+    sync_id = uuid.uuid4().hex
+    now = _now()
+    conn.execute(
+        "INSERT INTO sync_runs(sync_id,idempotency_key,domain,account_id,source,source_version,"
+        "status,attempt,started_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (sync_id, key, domain, account_id, source, source_version,
+         "RUNNING", int(attempt), now),
+    )
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM sync_runs WHERE sync_id=?", (sync_id,)).fetchone())
+
+
+def finish_sync_run(conn: sqlite3.Connection, sync_id: str, status: str,
+                    *, error_type: Optional[str] = None,
+                    error_message: Optional[str] = None,
+                    retryable: bool = False, details: Optional[Dict] = None) -> None:
+    if status not in ("RUNNING", "SYNCED", "PARTIAL", "FAILED", "SKIPPED"):
+        raise ValueError(f"非法 sync run status: {status}")
+    conn.execute(
+        "UPDATE sync_runs SET status=?, finished_at=?, error_type=?, error_message=?, "
+        "retryable=?, details_json=? WHERE sync_id=?",
+        (status, _now(), error_type, error_message, int(retryable),
+         json.dumps(details, ensure_ascii=False) if details is not None else None, sync_id),
+    )
+    conn.commit()
+
+
+def list_sync_runs(conn: sqlite3.Connection, domain: Optional[str] = None,
+                   account_id: Optional[str] = None, limit: int = 100) -> List[sqlite3.Row]:
+    sql = "SELECT * FROM sync_runs"
+    clauses: List[str] = []
+    params: List[Any] = []
+    if domain:
+        clauses.append("domain=?")
+        params.append(domain)
+    if account_id:
+        clauses.append("account_id=?")
+        params.append(account_id)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY started_at DESC LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def replace_account_positions(conn: sqlite3.Connection, account_id: str,
+                              positions: List[Dict], sync_id: str,
+                              observed_at: Optional[str] = None) -> None:
+    """原子替换 broker 持仓快照；主键确保重试不重复。"""
+    now = observed_at or _now()
+    symbols = {str(item["symbol"]).upper() for item in positions}
+    with immediate_transaction(conn):
+        if symbols:
+            marks = ",".join("?" for _ in symbols)
+            conn.execute(
+                f"DELETE FROM account_position_snapshot WHERE account_id=? "
+                f"AND symbol NOT IN ({marks})", [account_id, *sorted(symbols)])
+        else:
+            conn.execute("DELETE FROM account_position_snapshot WHERE account_id=?", (account_id,))
+        for item in positions:
+            symbol = str(item["symbol"]).upper()
+            raw = item.get("raw_json", item)
+            conn.execute(
+                "INSERT INTO account_position_snapshot(account_id,symbol,quantity,cost_price,"
+                "last_price,raw_json,metadata_status,metadata_source,metadata_version,"
+                "metadata_error,observed_at,sync_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(account_id,symbol) DO UPDATE SET quantity=excluded.quantity,"
+                "cost_price=excluded.cost_price,last_price=excluded.last_price,raw_json=excluded.raw_json,"
+                "metadata_status=excluded.metadata_status,metadata_source=excluded.metadata_source,"
+                "metadata_version=excluded.metadata_version,metadata_error=excluded.metadata_error,"
+                "observed_at=excluded.observed_at,sync_id=excluded.sync_id",
+                (account_id, symbol, float(item.get("quantity", 0) or 0),
+                 item.get("cost_price"), item.get("last_price"),
+                 json.dumps(raw, ensure_ascii=False, default=str),
+                 item.get("metadata_status", "UNKNOWN"), item.get("metadata_source", "unknown"),
+                 item.get("metadata_version", "unknown"), item.get("metadata_error"), now, sync_id),
+            )
+
+
+def list_account_positions(conn: sqlite3.Connection,
+                           account_id: str = "default") -> List[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM account_position_snapshot WHERE account_id=? ORDER BY symbol",
+        (account_id,),
+    ).fetchall()
+
+
+def replace_account_orders(conn: sqlite3.Connection, account_id: str,
+                           orders: List[Dict], sync_id: str,
+                           observed_at: Optional[str] = None) -> None:
+    now = observed_at or _now()
+    with immediate_transaction(conn):
+        conn.execute("DELETE FROM account_order_snapshot WHERE account_id=?", (account_id,))
+        for index, order in enumerate(orders):
+            key = str(order.get("order_id") or order.get("id") or
+                      f"{order.get('symbol', '')}:{order.get('side', '')}:{index}")
+            conn.execute(
+                "INSERT INTO account_order_snapshot(account_id,order_key,symbol,side,quantity,"
+                "status,raw_json,observed_at,sync_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                (account_id, key, order.get("symbol"), order.get("side"),
+                 order.get("quantity"), order.get("status"),
+                 json.dumps(order, ensure_ascii=False, default=str), now, sync_id),
+            )
+
+
+def list_account_orders(conn: sqlite3.Connection,
+                        account_id: str = "default") -> List[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM account_order_snapshot WHERE account_id=? ORDER BY order_key",
+        (account_id,),
+    ).fetchall()
 
 
 # ────────────────────────────────────────────────────────────────

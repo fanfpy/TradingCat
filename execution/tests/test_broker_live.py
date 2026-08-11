@@ -30,7 +30,8 @@ import pytest
 from shared import db as dbm
 from shared.account import AccountState
 from execution.models import (
-    ExecutionPlan, PlanOrder, Confirmation, MarketState, now_utc,
+    APPROVAL_PROOF_CHANNEL, ExecutionPlan, PlanOrder, Confirmation,
+    MarketState, now_utc,
 )
 from execution.order_manager import ConfirmationService, ApprovalAdapter, OrderManager
 from execution.broker import BrokerEventHandler
@@ -59,6 +60,14 @@ class FakeBrokerClient:
 
     def order_query(self, order_id):
         return {"order_id": order_id, "status": "Filled"}
+
+
+def verified_confirmation(conn, pending, nonce):
+    """测试专用：模拟 proof verifier 已成功后的 DB 写入结果。"""
+    row = dbm.approve_confirmation(
+        conn, pending.confirmation_id, "owner", APPROVAL_PROOF_CHANNEL, nonce,
+        expected_plan_id=pending.plan_id, expected_plan_hash=pending.plan_hash)
+    return Confirmation(**dict(row))
 
 
 # ────────────────────────────────────────────────────────────────
@@ -110,8 +119,9 @@ def approved_plan(conn, plan_id="p_live"):
     plan = make_live_plan(plan_id=plan_id)
     svc = ConfirmationService(conn)
     cfm = svc.create(plan)
-    approved = ApprovalAdapter(conn, channel="cli").approve(
-        cfm.confirmation_id, approved_by="owner", nonce=f"n_{plan_id}")
+    # broker 机械链测试使用已通过 proof 边界的持久化确认结果；旧 CLI 路径
+    # 的拒绝行为由 executiond 边界回归测试覆盖。
+    approved = verified_confirmation(conn, cfm, f"n_{plan_id}")
     return plan, approved
 
 
@@ -262,8 +272,7 @@ def test_live_with_wrong_plan_hash_rejected(conn):
     plan = make_live_plan()
     svc = ConfirmationService(conn)
     cfm = svc.create(plan)
-    approved = ApprovalAdapter(conn, channel="cli").approve(
-        cfm.confirmation_id, approved_by="owner", nonce="n_hash")
+    approved = verified_confirmation(conn, cfm, "n_hash")
     # 消费掉真实 plan 的 confirmation；伪造另一个 plan 用同一 confirmation 提交
     fake = FakeBrokerClient()
     broker = LiveBroker(conn, client=fake, enable_live=True)
@@ -282,8 +291,7 @@ def test_live_rejects_dry_run_plan(conn):
         orders=[PlanOrder("1", "NVDA.US", "BUY", 10, reference_price=223.96)])
     svc = ConfirmationService(conn)
     cfm = svc.create(plan)
-    approved = ApprovalAdapter(conn, channel="cli").approve(
-        cfm.confirmation_id, approved_by="owner", nonce="n_dry")
+    approved = verified_confirmation(conn, cfm, "n_dry")
     OrderManager(conn).consume(plan, approved)  # 消费链走完
     fake = FakeBrokerClient()
     broker = LiveBroker(conn, client=fake, enable_live=True)
@@ -432,7 +440,6 @@ def test_order_manager_marks_uncertain_submit_unknown(conn, approved_plan):
     # UNKNOWN 会让后续任何 LIVE 计划在 PreTradeRisk 处 fail closed。
     plan2 = make_live_plan(plan_id="p_after_unknown")
     svc = ConfirmationService(conn)
-    approved2 = ApprovalAdapter(conn).approve(
-        svc.create(plan2).confirmation_id, approved_by="owner", nonce="n_after_unknown")
+    approved2 = verified_confirmation(conn, svc.create(plan2), "n_after_unknown")
     with pytest.raises(RuntimeError, match="UNKNOWN"):
         om.submit(plan2, approved2, **risk_inputs(plan2))

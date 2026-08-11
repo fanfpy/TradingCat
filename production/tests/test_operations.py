@@ -148,6 +148,27 @@ def test_batch_reconciliation_restores_synced_or_sets_mismatch():
     assert dbm.list_intents(execution_conn, plan.plan_id)[0]["status"] == "UNKNOWN"
 
 
+def test_poll_failure_keeps_account_reconciling_fail_closed():
+    core_conn = dbm.get_core_conn(":memory:")
+    execution_conn = dbm.get_execution_conn(":memory:")
+    dbm.upsert_account(core_conn, "default", "SYNCED", cash=100_000,
+                       buying_power=50_000, nav=100_000)
+    plan = _submitted_plan(execution_conn, plan_id="p_poll_failure")
+
+    class PollFailureBroker:
+        def poll_active_orders(self, plan_id):
+            return {"ok": False, "checked": 1, "updated": 0,
+                    "errors": ["order query timeout"]}
+
+        def order_state(self, broker_order_id):
+            return {"status": "Submitted"}
+
+    result = reconcile_runtime(core_conn, execution_conn, PollFailureBroker(), plan.plan_id)
+    assert not result["ok"]
+    assert result["poll"]["ok"] is False
+    assert dbm.get_account(core_conn)["sync_status"] == "RECONCILING"
+
+
 def test_reconciliation_rejects_same_store():
     conn = dbm.get_core_conn(":memory:")
     with pytest.raises(RuntimeError, match="物理隔离"):

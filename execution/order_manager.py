@@ -6,8 +6,8 @@ ConfirmationService + OrderManager — 交易系统 v4.0（架构 D-3 / D-9 / D-
 
     ApprovalAdapter（唯一能产生 APPROVED）→ ConfirmationService → OrderManager（原子消费）
 
-- ApprovalAdapter：真实用户动作 → approve()。AI 可以生成 ExecutionPlan，AI 不能生成
-  HumanConfirmation(APPROVED)（D-12）。approval_nonce 防 replay。
+- ApprovalAdapter：旧 CLI/兼容 transport 只允许 DRY_RUN/PAPER；LIVE 的 APPROVED
+  必须由 ExecutionService 验证 ApprovalProof 后写入。
 - OrderManager 原子消费不变量（D-3 多订单版）：一个 Plan 的**全部** OrderIntent 创建 +
   Confirmation 置 CONSUMED 在**同一个本地 DB 事务**内完成，全成或全败。
 - 幂等（D-9）：plan_id + plan_order_id UNIQUE + client_request_id UNIQUE；
@@ -21,10 +21,11 @@ from typing import List, Optional
 from dataclasses import dataclass
 
 from execution.models import (
-    ExecutionPlan, Confirmation, PlanOrder, now_utc, compute_plan_hash, parse_ts,
-    CONFIRMATION_STATUSES,
+    APPROVAL_PROOF_CHANNEL, ExecutionPlan, Confirmation, PlanOrder, now_utc,
+    compute_plan_hash, parse_ts, CONFIRMATION_STATUSES,
 )
 from shared import db as dbm
+from execution.persistence import insert_plan
 
 
 # ────────────────────────────────────────────────────────────────
@@ -32,13 +33,16 @@ from shared import db as dbm
 # ────────────────────────────────────────────────────────────────
 
 class ApprovalAdapter:
-    """真实用户动作 → 生成 APPROVED Confirmation 的唯一路径。
+    """旧兼容审批 transport；不能 mint LIVE 的 ApprovalProof channel。
 
     生产实现（CLI/Web/微信）必须验证：用户身份 + approval_nonce + plan_id + plan_hash + 防 replay。
     AI Agent 不持有本类的批准能力——由外部真实用户动作显式调用 approve()。
     """
 
     def __init__(self, conn, channel: str = "cli"):
+        if channel == APPROVAL_PROOF_CHANNEL:
+            raise ValueError(
+                "approval-proof 只能由 ExecutionService 在验证 ApprovalProof 后写入")
         self.conn = conn
         self.channel = channel
 
@@ -78,15 +82,15 @@ class ConfirmationService:
             raise ValueError(f"Core plan_id {plan.plan_id} 内容/hash 不匹配")
         if core_stored is None:
             # 仅为旧测试和 DRY_RUN API 保留；LIVE CLI 会在进入本服务前强制双库。
-            dbm.insert_plan(self.core_conn, plan.plan_id, plan.account_id,
-                            plan.execution_mode, plan.expires_at, plan.plan_hash,
-                            [order.to_dict() for order in plan.orders])
+            insert_plan(self.core_conn, plan.plan_id, plan.account_id,
+                        plan.execution_mode, plan.expires_at, plan.plan_hash,
+                        [order.to_dict() for order in plan.orders])
 
         stored = dbm.get_plan(self.conn, plan.plan_id)
         if stored is None:
-            dbm.insert_plan(self.conn, plan.plan_id, plan.account_id, plan.execution_mode,
-                            plan.expires_at, plan.plan_hash,
-                            [order.to_dict() for order in plan.orders])
+            insert_plan(self.conn, plan.plan_id, plan.account_id, plan.execution_mode,
+                        plan.expires_at, plan.plan_hash,
+                        [order.to_dict() for order in plan.orders])
         elif stored["plan_hash"] != plan.plan_hash:
             raise ValueError(f"plan_id {plan.plan_id} 已绑定其他内容")
         dbm.insert_confirmation(self.conn, cid, plan.plan_id, plan.plan_hash,
@@ -105,9 +109,11 @@ class ConfirmationService:
 # ────────────────────────────────────────────────────────────────
 
 class OrderManager:
-    def __init__(self, conn, broker=None):
+    def __init__(self, conn, broker=None, risk_limits=None, daily_loss=None):
         self.conn = conn
         self.broker = broker  # 可选：真实券商客户端；None = dry-run（不实际下单）
+        self.risk_limits = risk_limits
+        self.daily_loss = daily_loss
 
     # ── 原子消费（D-3 核心不变量） ──────────────────────────────
 
@@ -118,6 +124,11 @@ class OrderManager:
         幂等：该 plan 已有 intents 时直接返回已有（绝不重复创建）。
         返回创建的 OrderIntent 列表（dict）。
         """
+        if (plan.execution_mode == "LIVE"
+                and confirmation.approval_channel != APPROVAL_PROOF_CHANNEL):
+            raise RuntimeError(
+                "LIVE 必须使用已验证的 ApprovalProof；旧 CLI/string APPROVED 只能用于 DRY_RUN/PAPER")
+
         current_hash = compute_plan_hash(
             plan.account_id, plan.execution_mode,
             [o.to_dict() for o in sorted(plan.orders, key=lambda x: x.plan_order_id)],
@@ -133,6 +144,9 @@ class OrderManager:
             if (row is None or row["status"] != "CONSUMED"
                     or row["plan_id"] != plan.plan_id or row["plan_hash"] != plan.plan_hash):
                 raise RuntimeError("已有 intents 与当前 Confirmation/Plan 不匹配")
+            if (plan.execution_mode == "LIVE"
+                    and row["approval_channel"] != APPROVAL_PROOF_CHANNEL):
+                raise RuntimeError("LIVE confirmation 未绑定已验证 ApprovalProof")
             return [dict(r) for r in existing]
 
         if confirmation.status != "APPROVED":
@@ -147,6 +161,9 @@ class OrderManager:
                 raise RuntimeError("confirmation.plan_id 与 ExecutionPlan 不匹配")
             if row["plan_hash"] != plan.plan_hash:
                 raise RuntimeError("plan_hash 不匹配：计划已被修改，Confirmation 失效")
+            if (plan.execution_mode == "LIVE"
+                    and row["approval_channel"] != APPROVAL_PROOF_CHANNEL):
+                raise RuntimeError("LIVE confirmation 未绑定已验证 ApprovalProof")
             if row["expires_at"] and parse_ts(row["expires_at"]) < parse_ts(now_utc()):
                 raise RuntimeError("confirmation 已过期")
             if plan.is_expired():
@@ -214,10 +231,27 @@ class OrderManager:
                market_states: Optional[dict] = None, account_state=None) -> List[dict]:
         """安全提交入口：consume（原子事务）→ 按 execution_mode 路由。
 
-        - DRY_RUN：创建 intents 后即止（不调券商，系统默认模式）
+        - DRY_RUN：创建 intents 后即止（不调券商）
+        - PAPER：只走本地 PaperBroker，不读取凭证、不触网
         - LIVE：必须 broker 可用，且仅限已通过 PreTradeRisk 的调用方
         """
-        if plan.execution_mode == "LIVE":
+        if plan.execution_mode not in ("DRY_RUN", "PAPER", "LIVE"):
+            raise RuntimeError(f"非法 execution_mode={plan.execution_mode}")
+        if (plan.execution_mode == "LIVE"
+                and confirmation.approval_channel != APPROVAL_PROOF_CHANNEL):
+            raise RuntimeError(
+                "LIVE 必须使用已验证的 ApprovalProof；旧 CLI/string APPROVED 只能用于 DRY_RUN/PAPER")
+        if plan.execution_mode == "LIVE" and self.broker is None:
+            raise RuntimeError("LIVE 模式需要 broker 客户端，未配置则拒绝并保持确认未消费")
+        if plan.execution_mode == "LIVE" and not getattr(self.broker, "enable_live", False):
+            raise RuntimeError("LIVE 模式必须使用显式 enable_live=True 的 LiveBroker")
+        if plan.execution_mode == "PAPER":
+            from execution.paper_broker import PaperBroker
+            if self.broker is None:
+                self.broker = PaperBroker(self.conn)
+            elif not isinstance(self.broker, PaperBroker):
+                raise RuntimeError("PAPER 模式只允许本地 PaperBroker，禁止注入其他路由器")
+        if plan.execution_mode in ("PAPER", "LIVE"):
             from execution.pretrade_risk import evaluate
             all_intents = dbm.list_intents(self.conn)
             risk = evaluate(
@@ -225,6 +259,8 @@ class OrderManager:
                 pending_intents=sum(1 for row in all_intents
                                     if row["status"] in ("PENDING", "SUBMITTING", "SUBMITTED")),
                 unknown_intents=sum(1 for row in all_intents if row["status"] == "UNKNOWN"),
+                risk_limits=self.risk_limits,
+                daily_loss=self.daily_loss,
             )
             dbm.audit(self.conn, "PRETRADE", entity_type="plan", entity_id=plan.plan_id,
                       payload={"decision": risk.decision, "reasons": risk.reasons})
@@ -242,9 +278,7 @@ class OrderManager:
                 raise RuntimeError("PreTradeRisk REJECT: " + "; ".join(risk.reasons))
 
         created = self.consume(plan, confirmation)
-        if plan.execution_mode == "LIVE":
-            if self.broker is None:
-                raise RuntimeError("LIVE 模式需要 broker 客户端，当前未配置（保持 dry-run）")
+        if plan.execution_mode in ("PAPER", "LIVE"):
             for intent in created:
                 stored = dbm.get_intent_by_request_id(self.conn, intent["client_request_id"])
                 if stored is None or stored["status"] != "PENDING":
@@ -267,8 +301,9 @@ class OrderManager:
                     self.broker.drain_events()
             from production.notification import safe_notify
             safe_notify(
-                self.conn, "broker.submitted", f"{plan.plan_id} 已提交券商",
-                f"PreTradeRisk=PASS, intents={len(created)}", severity="WARNING",
+                self.conn, "broker.submitted", f"{plan.plan_id} 已提交{'券商' if plan.execution_mode == 'LIVE' else '纸面路由'}",
+                f"PreTradeRisk=PASS, intents={len(created)}, mode={plan.execution_mode}",
+                severity="WARNING" if plan.execution_mode == "LIVE" else "INFO",
                 entity_type="plan", entity_id=plan.plan_id,
             )
         return created

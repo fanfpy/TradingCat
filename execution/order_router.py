@@ -38,7 +38,7 @@ class OrderRouter(Protocol):
 
         Args:
             intent: OrderIntent dict（含 client_request_id/symbol/side/quantity/order_type）
-            execution_mode: DRY_RUN | LIVE
+            execution_mode: DRY_RUN | PAPER | LIVE
 
         Returns:
             RouteResult
@@ -50,6 +50,8 @@ class DryRunRouter:
     """DRY_RUN 路由器——模拟券商提交，不触网。"""
 
     def route(self, intent: dict, execution_mode: str = "DRY_RUN") -> RouteResult:
+        if execution_mode != "DRY_RUN":
+            raise RuntimeError("DryRunRouter 只接受 DRY_RUN 计划")
         broker_id = f"dry-{intent.get('client_request_id', 'unknown')}"
         return RouteResult(
             broker_order_id=broker_id,
@@ -79,6 +81,9 @@ class LongbridgeRouter:
     def route(self, intent: dict, execution_mode: str = "DRY_RUN") -> RouteResult:
         if execution_mode == "DRY_RUN":
             return DryRunRouter().route(intent, execution_mode)
+
+        if execution_mode == "PAPER":
+            raise RuntimeError("PAPER 必须使用 PaperBroker，禁止落入 LongbridgeRouter")
 
         if not self.enable_live:
             raise RuntimeError("LIVE 路由需要 enable_live=True（铁律 1：禁止自动实盘）")

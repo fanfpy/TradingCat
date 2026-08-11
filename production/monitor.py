@@ -34,6 +34,8 @@ from shared.config import get_config
 from shared.indicators import sma, atr22
 from shared.market_calendar import completed_bar_freshness, market_for_symbol
 from shared.strategy_evaluator import ATR_PERIOD, StrategyEvaluator
+from shared.account import ensure_synced
+from shared.security import require_security_metadata
 
 # 盘中预警阈值（spec §3.1）
 _CONFIG = get_config()
@@ -55,6 +57,80 @@ def _completed_bar_freshness(conn, symbol: str, last_bar_date: str,
     source = source_row["source"] if source_row is not None else ""
     return completed_bar_freshness(
         conn, symbol, last_bar_date, as_of_date, source=source)
+
+
+def _symbol_data_health(conn, symbol: str, as_of_date: Optional[str] = None) -> Dict:
+    """统一生产数据 gate；synthetic/test fixtures 仍可用于纯策略单测。"""
+    bars = dbm.get_bars(conn, symbol)
+    if not bars:
+        return {"ok": False, "status": "UNKNOWN", "reason": "bars_missing"}
+    manifest = dbm.get_manifest(conn, symbol)
+    source = str(manifest["source"] if manifest is not None else "")
+    simulated = source.lower() in {"test", "e2e", "synthetic", "simulation"}
+    bar_sources = [row["source"] for row in conn.execute(
+        "SELECT DISTINCT source FROM bars WHERE symbol=?", (symbol,)).fetchall()]
+    if manifest is None and bar_sources and all(str(source).lower() in {
+            "test", "parity", "e2e", "synthetic", "simulation"}
+            for source in bar_sources):
+        return {"ok": True, "status": "TEST", "source": "test",
+                "data_version": "test-fixture"}
+    if manifest is None:
+        return {"ok": False, "status": "UNKNOWN", "reason": "manifest_missing"}
+    required = ("source", "fetched_at", "last_completed", "date_start",
+                "date_end", "bar_count", "sha256")
+    missing = [field for field in required if manifest[field] in (None, "")]
+    if missing:
+        return {"ok": False, "status": "UNKNOWN",
+                "reason": f"manifest_missing:{','.join(missing)}"}
+    if int(manifest["bar_count"] or 0) != len(bars):
+        return {"ok": False, "status": "MISMATCH",
+                "reason": "manifest_bar_count_mismatch"}
+    fresh, freshness_reason = _completed_bar_freshness(
+        conn, symbol, bars[-1]["ts"], as_of_date or datetime.now().strftime("%Y-%m-%d"))
+    if not fresh and not simulated:
+        return {"ok": False, "status": "STALE", "source": source,
+                "data_version": manifest["sha256"], "reason": freshness_reason}
+    try:
+        require_security_metadata(conn, symbol)
+    except ValueError as exc:
+        return {"ok": False, "status": "UNKNOWN", "source": source,
+                "data_version": manifest["sha256"], "reason": str(exc)}
+    return {"ok": True, "status": "SYNCED", "source": source,
+            "data_version": manifest["sha256"], "freshness": freshness_reason}
+
+
+def health_check(conn, symbols: Optional[List[str]] = None,
+                 account_id: str = "default", *, require_account: bool = True,
+                 as_of_date: Optional[str] = None,
+                 max_account_age_seconds: int = 30 * 60) -> Dict:
+    """返回可审计的 readiness 结果；非 healthy 结果只能安全降级。"""
+    checks = {"symbols": {}, "account": None}
+    failures: List[Dict] = []
+    if require_account:
+        account = ensure_synced(conn, account_id, max_account_age_seconds)
+        checks["account"] = {
+            "status": account.sync_status,
+            "updated_at": account.updated_at,
+            "source": account.source,
+            "source_version": account.source_version,
+            "last_success_at": account.last_success_at,
+            "failure_reason": account.failure_reason,
+        }
+        if not account.synced:
+            failures.append({"gate": "account", "status": account.sync_status,
+                             "reason": account.failure_reason or "account_not_synced"})
+    for symbol in symbols or []:
+        result = _symbol_data_health(conn, symbol, as_of_date)
+        checks["symbols"][symbol] = result
+        if not result["ok"]:
+            failures.append({"gate": "symbol", "symbol": symbol,
+                             "status": result["status"], "reason": result["reason"]})
+    report = {"ok": not failures, "status": "HEALTHY" if not failures else "BLOCKED",
+              "failures": failures, "checks": checks}
+    dbm.audit(conn, "MONITOR_HEALTH", "account", account_id,
+              {"status": report["status"], "failures": failures,
+               "symbols": list(symbols or [])})
+    return report
 
 def reset_alert_log(date: str) -> None:
     """兼容旧调用；v5 去重已持久化，按日期键自然滚动，无需清空内存。"""
@@ -89,6 +165,8 @@ class PreMarketReport:
     protective_missing: bool = False
     alerts: List[Alert] = field(default_factory=list)
     position_open: bool = False
+    blocked: bool = False
+    block_reason: Optional[str] = None
 
 
 def pre_market_check(conn, symbol: str, params: Dict, date: str,
@@ -103,6 +181,13 @@ def pre_market_check(conn, symbol: str, params: Dict, date: str,
         realtime_position: 长桥实时持仓 dict（portfolio 表无行时的降级来源）
     """
     report = PreMarketReport(symbol=symbol)
+    health = _symbol_data_health(conn, symbol, date)
+    if not health["ok"]:
+        report.blocked = True
+        report.block_reason = health["reason"]
+        report.alerts.append(Alert(symbol, "data_blocked",
+                                   f"数据 gate 阻断：{health['reason']}"))
+        return report
     bars = dbm.get_bars(conn, symbol)
     if len(bars) < 50:
         report.alerts.append(Alert(symbol, "data", "数据不足"))
@@ -187,6 +272,11 @@ def intraday_check(conn, symbol: str, params: Dict, date: str,
         realtime_position: 长桥实时持仓 dict（portfolio 表无行时的降级来源）
     """
     alerts: List[IntradayAlert] = []
+    health = _symbol_data_health(conn, symbol, date)
+    if not health["ok"]:
+        alerts.append(IntradayAlert(
+            symbol, "data_blocked", f"数据 gate 阻断：{health['reason']}"))
+        return alerts
     bars = dbm.get_bars(conn, symbol)
     if not bars:
         return alerts
@@ -251,6 +341,10 @@ def post_market_check(conn, symbol: str, params: Dict, date: str,
         realtime_position: 长桥实时持仓 dict（portfolio 表无行时的降级来源）
     """
     report = PostMarketReport(symbol=symbol, date=date)
+    health = _symbol_data_health(conn, symbol, date)
+    if not health["ok"]:
+        report.messages.append(f"数据 gate 阻断：{health['reason']}")
+        return report
     bars = dbm.get_bars(conn, symbol)
     n = len(bars)
     if n < 50:
@@ -590,6 +684,7 @@ if __name__ == "__main__":
                 realtime_quote: Optional[Dict] = None) -> Dict:
         bars = dbm.get_bars(conn, symbol)
         status = "数据不足" if len(bars) < MIN_BARS else "ok"
+        data_health = _symbol_data_health(conn, symbol, date)
         params = params_for(symbol)
 
         if command == "pre":
@@ -602,6 +697,9 @@ if __name__ == "__main__":
                 "current_stop": rep.current_stop,
                 "position_open": rep.position_open,
                 "protective_missing": rep.protective_missing,
+                "health_status": data_health["status"],
+                "blocked": rep.blocked,
+                "block_reason": rep.block_reason,
                 "alerts": [{"level": a.level, "kind": a.kind, "message": a.message}
                            for a in rep.alerts],
             }
@@ -625,6 +723,9 @@ if __name__ == "__main__":
                                  "longbridge_sdk" if quote_price > 0 else
                                  "last_close_fallback"),
                 "realtime_price": realtime,
+                "health_status": data_health["status"],
+                "blocked": not data_health["ok"],
+                "block_reason": data_health.get("reason"),
                 "alerts": [{"condition": a.condition, "tag": a.tag, "message": a.message}
                            for a in alerts],
             }
@@ -640,6 +741,9 @@ if __name__ == "__main__":
             "exit_triggered": rep.exit_triggered,
             "stop_changed": rep.stop_changed,
             "ledger_update_needed": rep.ledger_update_needed,
+            "health_status": data_health["status"],
+            "blocked": not data_health["ok"],
+            "block_reason": data_health.get("reason"),
             "messages": rep.messages,
         }
         if position is not None:
@@ -693,6 +797,16 @@ if __name__ == "__main__":
         }, ensure_ascii=False, indent=2))
         sys.exit(0)
 
+    readiness = health_check(
+        conn, symbols, require_account=args.scope != "watchlist", as_of_date=date)
+    if not readiness["ok"]:
+        print(json.dumps({
+            "command": args.command, "date": date, "scope": scope_label,
+            "status": "BLOCKED", "symbols_checked": 0, "results": [],
+            "health": readiness,
+        }, ensure_ascii=False, indent=2))
+        sys.exit(2)
+
     quote_map: Dict[str, Dict] = {}
     protective_symbols: Optional[List[str]] = None
     realtime_errors = []
@@ -722,6 +836,7 @@ if __name__ == "__main__":
         "command": args.command, "date": date, "scope": scope_label,
         "status": "SAFE_DEGRADE" if realtime_errors else "ok",
         "symbols_checked": len(symbols), "results": results,
+        "health": readiness,
     }
     if realtime_errors:
         out["realtime_errors"] = realtime_errors

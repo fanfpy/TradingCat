@@ -486,7 +486,7 @@ class LongbridgeClient:
     def positions(self, strict: bool = True) -> List[dict]:
         """获取当前持仓列表；默认 strict，查询失败不得伪装成空持仓。"""
         try:
-            resp = self._trade_ctx.stock_positions()
+            resp = self._require_trade_ctx().stock_positions()
             positions = []
             for channel in resp.channels:
                 for pos in channel.positions:
@@ -540,7 +540,7 @@ class LongbridgeClient:
     def assets(self, strict: bool = True) -> Optional[dict]:
         """获取账户资产概览 (对应 CLI: assets)"""
         try:
-            resp = self._trade_ctx.account_balance()
+            resp = self._require_trade_ctx().account_balance()
             if resp and len(resp) > 0:
                 bal = resp[0]
                 return {
@@ -1164,16 +1164,28 @@ class LongbridgeClient:
         market_enum = getattr(_Market, market.upper(), None) if _Market else None
         if market_enum is None:
             raise ValueError(f"不支持的市场: {market}")
-        response = self._require_quote_ctx().trading_days(market_enum, start, end)
-        full = (getattr(response, "trading_days", None)
-                or getattr(response, "trade_days", None)
-                or getattr(response, "trade_day", None) or [])
-        half = (getattr(response, "half_trading_days", None)
-                or getattr(response, "half_trade_days", None)
-                or getattr(response, "half_trade_day", None) or [])
-        full_dates = {str(item) for item in full}
-        half_dates = {str(item) for item in half}
+        if end < start:
+            raise ValueError("calendar end 必须 >= start")
+
+        # Longbridge 4.4.3 的 trading_days 接口单次查询区间不能超过一个月。
+        # 以 30 天窗口分段，并合并响应，保持客户端的跨月调用契约不变。
         from datetime import timedelta
+        full_dates = set()
+        half_dates = set()
+        window_start = start
+        while window_start <= end:
+            window_end = min(end, window_start + timedelta(days=29))
+            response = self._require_quote_ctx().trading_days(
+                market_enum, window_start, window_end)
+            full = (getattr(response, "trading_days", None)
+                    or getattr(response, "trade_days", None)
+                    or getattr(response, "trade_day", None) or [])
+            half = (getattr(response, "half_trading_days", None)
+                    or getattr(response, "half_trade_days", None)
+                    or getattr(response, "half_trade_day", None) or [])
+            full_dates.update(str(item) for item in full)
+            half_dates.update(str(item) for item in half)
+            window_start = window_end + timedelta(days=1)
         rows = []
         current = start
         while current <= end:

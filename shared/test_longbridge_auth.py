@@ -2,6 +2,9 @@
 
 import json
 import os
+import inspect
+from datetime import date
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -89,6 +92,112 @@ def test_client_uses_sdk_apikey_factory(monkeypatch):
     assert isinstance(client._config, FactoryConfig)
     assert calls == [{"app_key": "app-key", "app_secret": "app-secret",
                       "access_token": "legacy-token"}]
+
+
+def test_installed_longbridge_443_exposes_legacy_and_boundary_methods():
+    import longbridge.openapi as sdk
+
+    assert version("longbridge") == "4.4.3"
+    assert callable(sdk.Config.from_apikey)
+    assert list(inspect.signature(sdk.Config.from_apikey).parameters)[:3] == [
+        "app_key", "app_secret", "access_token"]
+    assert callable(sdk.QuoteContext.quote)
+    assert callable(sdk.QuoteContext.static_info)
+    assert callable(sdk.QuoteContext.trading_days)
+    assert callable(sdk.TradeContext.submit_order)
+    assert callable(sdk.TradeContext.account_balance)
+    assert callable(sdk.TradeContext.stock_positions)
+
+
+def test_client_adapts_v443_quote_account_positions_and_calendar(monkeypatch):
+    calls = []
+    trade_calls = []
+
+    class FakeQuoteContext:
+        def __init__(self, config):
+            self.config = config
+
+        def quote(self, symbols):
+            return [type("SecurityQuote", (), {
+                "symbol": symbols[0], "last_done": "101.5", "prev_close": "100",
+                "high": "102", "low": "99", "open": "100.5", "volume": 12,
+                "turnover": "1218", "timestamp": "2026-08-11 10:00:00",
+            })()]
+
+        def static_info(self, symbols):
+            return [type("SecurityStaticInfo", (), {
+                "symbol": symbols[0], "name_en": "Apple", "name_cn": "",
+                "name_hk": "", "exchange": "NASDAQ", "currency": "USD",
+                "lot_size": 1, "board": "USMain", "total_shares": 10,
+                "circulating_shares": 9, "eps": "2.5", "eps_ttm": "3.5",
+                "bps": "4.5", "dividend_yield": "0.25",
+            })()]
+
+        def trading_days(self, market, begin, end):
+            calls.append((market, begin, end))
+            return type("MarketTradingDays", (), {
+                "trading_days": [begin], "half_trading_days": [end]
+            })()
+
+    class FakeTradeContext:
+        def __init__(self, config):
+            self.config = config
+
+        def account_balance(self):
+            return [type("AccountBalance", (), {
+                "total_cash": "1000", "max_finance_amount": "250",
+                "net_assets": "1200", "currency": "USD",
+            })()]
+
+        def stock_positions(self):
+            return type("StockPositionsResponse", (), {"channels": [
+                type("StockPositionChannel", (), {
+                    "account_channel": "US", "positions": [
+                        type("StockPosition", (), {
+                            "symbol": "AAPL.US", "quantity": "2",
+                            "available_quantity": "2", "cost_price": "90",
+                            "currency": "USD",
+                        })()
+                    ]
+                })()
+            ]})()
+
+        def submit_order(self, **kwargs):
+            trade_calls.append(kwargs)
+            return type("SubmitOrderResponse", (), {
+                "order_id": "dry-run-order", "status": "Submitted"
+            })()
+
+    class FakeConfig:
+        @classmethod
+        def from_apikey(cls, **kwargs):
+            return kwargs
+
+    class FakeMarket:
+        US = "US"
+
+    monkeypatch.setattr(lb, "_load_sdk", lambda: True)
+    monkeypatch.setattr(lb, "_Config", FakeConfig)
+    monkeypatch.setattr(lb, "_QuoteContext", FakeQuoteContext)
+    monkeypatch.setattr(lb, "_TradeContext", FakeTradeContext)
+    monkeypatch.setattr(lb, "_Market", FakeMarket)
+
+    client = lb.LongbridgeClient(
+        app_key="app-key", app_secret="app-secret", access_token="legacy-token")
+
+    assert client.quote("AAPL.US")["current_price"] == 101.5
+    assert client.static_info("AAPL.US")["dividend_per_share"] == 0.25
+    assert client.assets() == {
+        "total_cash": "1000.0", "max_finance_amount": "250.0",
+        "net_assets": "1200.0", "currency": "USD",
+    }
+    assert client.positions()[0]["symbol"] == "AAPL.US"
+    assert client.order("buy", "AAPL.US", 2, price=101.5)["success"] is True
+    assert trade_calls[0]["submitted_quantity"] == 2
+    rows = client.trading_calendar("US", date(2026, 1, 1), date(2026, 2, 15))
+    assert len(calls) == 2
+    assert rows[0] == {"trade_date": "2026-01-01", "is_open": True, "half_day": False}
+    assert rows[-1] == {"trade_date": "2026-02-15", "is_open": True, "half_day": True}
 
 
 def test_quote_and_trade_contexts_are_structurally_isolated(monkeypatch):

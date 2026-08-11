@@ -10,9 +10,12 @@ import json
 import uuid
 from typing import Optional
 
-from execution.models import Confirmation, ExecutionPlan, PlanOrder
+from execution.models import (
+    APPROVAL_PROOF_CHANNEL, Confirmation, ExecutionPlan, PlanOrder,
+)
 from execution.approval_wechat import IdentityProof, IdentityVerifier
 from shared import db as dbm
+from execution.persistence import insert_plan
 
 
 # 对外采用架构 v5 名称；保留 IdentityProof 的 wire shape 兼容已有微信适配器。
@@ -48,7 +51,7 @@ class ExecutionService:
         if plan.plan_hash != row["plan_hash"]:
             raise RuntimeError("Core ExecutionPlan hash 校验失败，拒绝建立执行快照")
 
-        dbm.insert_plan(
+        insert_plan(
             self.execution_conn, plan.plan_id, plan.account_id,
             plan.execution_mode, plan.expires_at, plan.plan_hash,
             [order.to_dict() for order in plan.orders],
@@ -86,7 +89,7 @@ class ExecutionService:
             plan_id=row["plan_id"], plan_hash=row["plan_hash"],
         )
         approved = dbm.approve_confirmation(
-            self.execution_conn, confirmation_id, owner, "approval-proof",
+            self.execution_conn, confirmation_id, owner, APPROVAL_PROOF_CHANNEL,
             proof.nonce, expected_plan_id=row["plan_id"],
             expected_plan_hash=row["plan_hash"],
         )

@@ -104,8 +104,14 @@ def reconcile_runtime(core_conn, execution_conn, broker,
     result = (reconciler.reconcile_plan(plan_id) if plan_id
               else reconciler.reconcile_all())
     current = dbm.get_account(core_conn, "default")
-    if result["ok"] and current is not None and current["sync_status"] == "RECONCILING":
+    poll_ok = poll_result is None or poll_result.get("ok", False)
+    if (result["ok"] and poll_ok and current is not None
+            and current["sync_status"] == "RECONCILING"):
         dbm.set_account_sync_status(core_conn, "default", previous_status)
     if poll_result is not None:
         result["poll"] = poll_result
+        if not poll_result.get("ok", False):
+            # 查询失败本身就是状态未知：保持 RECONCILING，禁止后续 LIVE。
+            result["ok"] = False
+            result.setdefault("errors", []).extend(poll_result.get("errors", []))
     return result

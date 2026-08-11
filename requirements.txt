@@ -17,8 +17,8 @@
 
 # ── 运行时依赖 ────────────────────────────────────────────────────────
 # longbridge：固定兼容版 4.4.3，PyPI 提供 Python 3.12/3.11 wheel。
-#   - 该版本覆盖行情、日线、账户与订单 API；不含 FundamentalContext；
-#   - 基本面按 Provider 能力安全降级，可由 OpenAlice 补充当前分析，但不得回填历史 PIT；
+#   - 该版本覆盖行情、日线、账户与订单 API，并导出 FundamentalContext；本适配层
+#     当前只依赖稳定的行情/交易边界，基本面仍按 Provider 能力安全降级，禁止回填历史 PIT；
 #   - Python API（from longbridge.openapi import ...），由
 #     shared/longbridge_client.py 延迟加载；生产路径只用 Legacy API Key，
 #     不调用 CLI/OAuth。

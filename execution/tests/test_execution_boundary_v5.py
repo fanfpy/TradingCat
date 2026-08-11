@@ -107,6 +107,21 @@ def test_only_valid_approval_proof_mints_execution_approval(stores):
     assert approved.approval_channel == "approval-proof"
 
 
+def test_valid_execution_service_proof_can_consume_live_plan(stores):
+    core, execution, verifier = stores
+    plan = _plan("p_proof_consume")
+    _persist_core(core, plan)
+    service = ExecutionService(core, execution, identity_verifier=verifier)
+    pending = service.request_confirmation(plan.plan_id)
+    approved = service.approve(pending.confirmation_id, _proof(verifier, pending))
+
+    created = OrderManager(execution).consume(plan, approved)
+
+    assert len(created) == 1
+    assert dbm.get_confirmation(execution, approved.confirmation_id)["status"] == "CONSUMED"
+    assert dbm.list_intents(execution, plan.plan_id)[0]["status"] == "PENDING"
+
+
 def test_approval_proof_nonce_replay_and_expiry_are_rejected(stores):
     core, execution, verifier = stores
     first = _plan("p_first")

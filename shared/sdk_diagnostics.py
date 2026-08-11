@@ -33,11 +33,17 @@ def diagnose_longbridge(*, connect: bool = False,
 
     result["installed"] = True
     result["version"] = installed
+    config_type = getattr(sdk, "Config", None)
+    quote_type = getattr(sdk, "QuoteContext", None)
+    trade_type = getattr(sdk, "TradeContext", None)
     result["capabilities"] = {
-        "api_key_config": hasattr(sdk, "Config"),
-        "quote": hasattr(sdk, "QuoteContext"),
-        "trade": hasattr(sdk, "TradeContext"),
-        "market_calendar": hasattr(getattr(sdk, "QuoteContext", object), "trading_days"),
+        "api_key_config": callable(getattr(config_type, "from_apikey", None)),
+        "quote": hasattr(quote_type, "quote"),
+        "trade": hasattr(trade_type, "submit_order"),
+        "static_info": hasattr(quote_type, "static_info"),
+        "market_calendar": hasattr(quote_type, "trading_days"),
+        "account": hasattr(trade_type, "account_balance"),
+        "positions": hasattr(trade_type, "stock_positions"),
         "fundamental_context": hasattr(sdk, "FundamentalContext"),
         "financial_report": hasattr(
             getattr(sdk, "FundamentalContext", object), "financial_report"),
@@ -62,7 +68,10 @@ def diagnose_longbridge(*, connect: bool = False,
         and result["capabilities"]["api_key_config"]
         and result["capabilities"]["quote"]
         and result["capabilities"]["trade"]
+        and result["capabilities"]["static_info"]
         and result["capabilities"]["market_calendar"]
+        and result["capabilities"]["account"]
+        and result["capabilities"]["positions"]
     )
     credentials_ok = result["credentials"]["quote"] or not require_credentials
     base_ok = capabilities_ok and credentials_ok
