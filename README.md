@@ -16,9 +16,10 @@ TradingCat 是一个面向个人投资者的、Agent 无关的量化研究与交
 分析、策略验证、关注监控、Kelly 仓位建议、组合风控和人工审批串成闭环，同时保持
 QwenPaw、Codex、Trae 等上层 Agent 可替换。
 
-当前系统处于 **DRY_RUN_ONLY**：研究与真实只读行情已验收，任何实盘订单仍必须经过
-独立 executiond、有效的人工 `ApprovalProof`、审批后风控和显式 Live Canary。普通 CLI
-不能批准或提交实盘订单。
+当前默认运行模式是 **PAPER/DRY_RUN**。LIVE 软件链路已经支持“生成计划 → 请求审批 →
+可信 `ApprovalProof` → executiond 执行 → 成交回报与对账”，但生产真实订单仍必须经过
+独立 executiond、有效的人工 `ApprovalProof`、审批后风控、P0-A 部署验收和显式 Live Canary。
+Agent 可以调用 `execute` 转发已批准的计划，但不能创建或伪造 `ApprovalProof`。
 
 ## 能力概览
 
@@ -131,8 +132,28 @@ printf '{"account_id":"default"}' |
 
 所有响应使用 `tradingcat.v1` envelope，包含 `ok`、`data`、`error`、`warnings` 和
 `lineage`。Agent 可以解释和展示结果，但不能伪造审批，也不能绕过 executiond。
-完整的意图分发、JSON payload、结果判读和停止规则见
-[Agent 集成手册](docs/agent-integration.md)。
+Agent 运行时应先读取根目录 [SKILL.md](SKILL.md)，再读取
+[Agent 集成手册](docs/agent-integration.md)；前者是 skill 入口，后者是详细的意图分发、
+JSON payload、结果判读和停止规则。
+
+LIVE 计划的 Agent 调用顺序如下；审批凭证必须由受信人工审批通道产生：
+
+```bash
+# 1. 只生成待审批 LIVE 计划，不会下单
+printf '%s' '{"equity":100000,"account_id":"default","mode":"LIVE"}' |
+  ./.venv/bin/python -m application.cli propose-trade
+
+# 2. 使用返回的不可变 plan_id/plan_hash 创建 PENDING confirmation
+printf '%s' '{"plan_id":"plan_xxx","plan_hash":"hash_xxx","idempotency_key":"approval-001"}' |
+  ./.venv/bin/python -m application.cli request-approval
+
+# 3. 受信审批通道完成 ApprovalProof 后，才允许转发执行
+printf '%s' '{"plan_id":"plan_xxx","confirmation_id":"cfm_xxx"}' |
+  ./.venv/bin/python -m application.cli execute
+```
+
+`execute` 只接受 `plan_id` 和 `confirmation_id`，不会接受或合并 symbol、side、quantity、
+price 等订单覆盖字段。
 
 ## 安全边界
 
@@ -160,6 +181,7 @@ Live Canary，也不会提交真实订单。
 
 ## 文档
 
+- [Agent skill 入口](SKILL.md)
 - [架构说明](docs/architecture.md)
 - [Agent 集成手册](docs/agent-integration.md)
 - [使用说明](docs/usage.md)

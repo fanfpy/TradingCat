@@ -11,10 +11,12 @@ investors. It connects stock analysis, strategy validation, watchlist monitoring
 position guidance, portfolio risk, immutable trade plans, and explicit human approval without
 depending on QwenPaw, Codex, Trae, or any other Agent runtime.
 
-The project is currently **DRY_RUN_ONLY**. Research and real read-only market data have been
-validated. A live order still requires an isolated execution service, a valid human
-`ApprovalProof`, post-approval risk checks, and an explicitly scoped Live Canary. The ordinary CLI
-cannot approve or submit a live order.
+The default operating modes are **PAPER/DRY_RUN**. The LIVE software path supports immutable
+proposal, pending approval, trusted `ApprovalProof`, isolated executiond execution, broker events,
+and reconciliation. Production real orders still require the isolated execution service, valid
+human proof, P0-A deployment acceptance, post-approval risk checks, and an explicitly scoped Live
+Canary. Agents may forward an already approved plan through `execute`, but must never create or
+forge an `ApprovalProof`.
 
 ## Features
 
@@ -84,8 +86,26 @@ Every response uses the `tradingcat.v1` envelope with `ok`, `data`, `error`, `wa
 `lineage`. An Agent may explain a result or request a pending approval, but it must not mint an
 approval proof or bypass executiond.
 
-See [Agent integration](docs/agent-integration.md) for the intent routing table, payload schemas,
-result interpretation, and mandatory stop conditions.
+Agent runtimes should read the root [SKILL.md](SKILL.md) first, followed by
+[Agent integration](docs/agent-integration.md). `SKILL.md` is the discoverable skill entry point;
+the integration guide contains the detailed intent routing table, payload schemas, result
+interpretation, and mandatory stop conditions.
+
+The LIVE Agent sequence is:
+
+```bash
+# Create a pending LIVE plan; this does not place an order.
+printf '%s' '{"equity":100000,"account_id":"default","mode":"LIVE"}' |
+  ./.venv/bin/python -m application.cli propose-trade
+
+# Bind a pending approval request to the returned immutable plan hash.
+printf '%s' '{"plan_id":"plan_xxx","plan_hash":"hash_xxx","idempotency_key":"approval-001"}' |
+  ./.venv/bin/python -m application.cli request-approval
+
+# After a trusted human approval channel records ApprovalProof, execute by identifiers only.
+printf '%s' '{"plan_id":"plan_xxx","confirmation_id":"cfm_xxx"}' |
+  ./.venv/bin/python -m application.cli execute
+```
 
 ## Safety invariants
 
@@ -120,6 +140,7 @@ Acceptance never creates a Live Canary or places a real order.
 
 ## Documentation
 
+- [Agent skill entry point](SKILL.md)
 - [Architecture](docs/architecture.md)
 - [Agent integration](docs/agent-integration.md)
 - [Usage guide](docs/usage.md)

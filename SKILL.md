@@ -1,6 +1,6 @@
 ---
 name: trading-system
-description: Agent-independent personal quantitative investing workflow for stock analysis, strategy research and backtesting, watchlists and signal monitoring, Kelly position sizing, portfolio review, immutable trade proposals, approval requests, reconciliation, and audit explanations. Use when a user asks TradingCat to analyze or follow a stock, validate a strategy, monitor buy/sell signals, review holdings, recommend target allocation, prepare a trade plan, or inspect the system's research and execution evidence.
+description: Agent-independent personal quantitative investing workflow for stock analysis, strategy research and backtesting, watchlists and signal monitoring, Kelly position sizing, portfolio review, immutable trade proposals, trusted approval requests, identifier-only execution, reconciliation, and audit explanations. Use when a user asks TradingCat to analyze or follow a stock, validate a strategy, monitor buy/sell signals, review holdings, recommend target allocation, prepare a trade plan, request approval, execute an already approved plan, or inspect the system's research and execution evidence.
 ---
 
 # TradingCat
@@ -49,7 +49,9 @@ Dispatch user intent as follows:
 | Follow a stock | `follow-security` |
 | Review holdings and target weights | `review-portfolio` |
 | Prepare a DRY_RUN plan | `propose-trade` |
-| Request a pending approval | `request-approval` |
+| Prepare a LIVE plan for explicit approval | `propose-trade` with `mode=LIVE` |
+| Request a pending approval | `request-approval` with `plan_id` and `plan_hash` |
+| Submit an already approved plan | `execute` with `plan_id` and `confirmation_id` |
 | Explain plan evidence | `explain-decision` |
 | Cache, research, monitor, sync, reconcile, or back up | `./tc` operational command |
 
@@ -111,6 +113,13 @@ printf '{"query":"AAPL","reason":"等待趋势信号"}' |
 5. Use `ExplainDecision` to answer where a plan came from; cite strategy, data, policy, and audit
    identifiers from the response rather than reconstructing them.
 
+For an explicitly requested LIVE workflow, `ProposeTrade` with `mode=LIVE` creates an immutable
+plan and returns `PENDING_APPROVAL`; it does not approve or submit anything. Then call
+`RequestApproval` with the returned `plan_id` and `plan_hash`. A trusted human approval adapter
+must produce the signed `ApprovalProof`; the Agent must not create, copy, or replay that proof.
+Only after trusted approval is recorded may the Agent call `execute` with exactly `plan_id` and
+`confirmation_id`. `execute` never accepts symbol, side, quantity, price, or mode overrides.
+
 ## Enforce execution invariants
 
 - Never let an Agent, strategy, monitor, scheduler, or ordinary CLI mint LIVE `APPROVED`.
@@ -120,8 +129,10 @@ printf '{"query":"AAPL","reason":"等待趋势信号"}' |
 - Consume Confirmation and create all OrderIntents atomically and idempotently.
 - Block new LIVE work for non-SYNCED accounts, UNKNOWN orders, MISMATCH reconciliation, expired
   proofs, proof replay, or a closed Canary.
-- Keep normal operation `DRY_RUN_ONLY`. Real orders require the user to explicitly authorize P0-B
-  scope and complete `docs/live-trading-checklist.md`.
+- Keep normal operation in `DRY_RUN`/`PAPER`. The LIVE software path supports proposal, trusted
+  approval, executiond execution, broker events, and reconciliation, but production real orders
+  still require explicit P0-B scope and completion of `docs/live-trading-checklist.md` in the
+  target deployment environment.
 
 ## Respect data boundaries
 

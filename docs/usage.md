@@ -66,8 +66,10 @@ JSON 契约比终端文本稳定，响应统一为：
 
 Agent 必须展示 `warnings`，不能把缺失数据解释为零，也不能把“关注”解释为“可以买入”。
 
-稳定短入口是 `analyze`、`backtest`、`propose`、`paper`、`status` 和 `report`。`propose`
-默认使用本地 PAPER 语义，`paper` 强制 PAPER；两者收到 `mode=LIVE` 都返回 `LIVE_DISABLED`。
+稳定短入口是 `analyze`、`backtest`、`propose`、`paper`、`status`、`report`、
+`request-approval`、`approve` 和 `execute`。`propose` 默认使用本地 PAPER 语义，`paper`
+强制 PAPER；显式传入 `mode=LIVE` 时，`propose` 只生成 `PENDING_APPROVAL` 的不可变计划，
+不会批准或下单。
 
 ## 3. 分析一只股票
 
@@ -178,6 +180,25 @@ printf '{"equity":100000,"account_id":"default","mode":"DRY_RUN"}' |
 
 返回的 `execution_plan` 是不可变建议，不是成交。`requires_explicit_human_approval=true`
 表示后续必须由真实用户审批指定的 `plan_hash`。
+
+LIVE Agent 流程：
+
+```bash
+# 生成待审批 LIVE 计划
+printf '%s' '{"equity":100000,"account_id":"default","mode":"LIVE"}' |
+  ./.venv/bin/python -m application.cli propose-trade
+
+# 必须绑定返回的 plan_id 和 plan_hash
+printf '%s' '{"plan_id":"plan_xxx","plan_hash":"hash_xxx","idempotency_key":"approval-001"}' |
+  ./.venv/bin/python -m application.cli request-approval
+
+# 受信人工审批通道完成 ApprovalProof 后，执行只传两个标识符
+printf '%s' '{"plan_id":"plan_xxx","confirmation_id":"cfm_xxx"}' |
+  ./.venv/bin/python -m application.cli execute
+```
+
+Agent 不得自行生成 `ApprovalProof`，也不得向 `execute` 传入 symbol、side、quantity、
+price 或其他订单覆盖字段。
 
 仅用于本地 PAPER 的人工演练：
 

@@ -7,10 +7,12 @@
 
 1. 把包含 `SKILL.md` 的目录作为 `TS_ROOT`，不要硬编码 QwenPaw 或当前服务器路径。
 2. 优先通过 `application.cli` 的 JSON stdin/stdout 契约调用业务用例。稳定短操作名为
-   `analyze`、`backtest`、`propose`、`paper`、`status`、`report`；旧的带资源名操作仍兼容。
+   `analyze`、`backtest`、`propose`、`paper`、`status`、`report`、`request-approval`、
+   `approve` 和 `execute`；旧的带资源名操作仍兼容。
 3. 只有研究缓存、监控、账户同步、备份等运维动作才调用 `./tc`。
 4. 以退出码和 JSON envelope 共同判断结果；始终向用户展示 `warnings`。
-5. Agent 可以分析、关注、复核、提出计划和申请审批，不能批准或提交 LIVE 订单。
+5. Agent 可以分析、关注、复核、提出计划和申请审批；不能制造 `ApprovalProof`。在可信
+   人工审批已完成后，Agent 可以调用 `execute` 转发不可变的 `plan_id` 与 `confirmation_id`。
 
 推荐进程调用方式：
 
@@ -37,9 +39,13 @@ SDK。正式支持版本固定为 `longbridge==4.4.3`。
 | `paper` | 本地纸面建议 | 强制 `PAPER`，不触达券商 |
 | `status` | 账户/计划/安全状态 | 只读，明确 `live_enabled=false` |
 | `report` | 本地状态摘要 | 只读、`LOCAL_ONLY` |
+| `request-approval` | 创建待审批 Confirmation | 只创建 `PENDING`，必须绑定 `plan_hash` |
+| `approve` | 记录可信人工审批 | 只接受完整、签名的 `ApprovalProof`；Agent 不得生成 |
+| `execute` | 执行已批准计划 | 只接受 `plan_id`、`confirmation_id`；由 executiond 执行 |
 
-`propose` 和 `paper` 收到 `mode=LIVE` 一律返回 `LIVE_DISABLED`；JSON 契约没有批准或提交
-LIVE 的能力。
+`propose` 收到 `mode=LIVE` 会生成不可变计划并返回 `PENDING_APPROVAL`，不会批准或提交；
+`paper` 始终强制 `PAPER`。LIVE 的批准必须来自可信人工审批通道，执行必须经过
+executiond。
 
 ## 3. 意图分发表
 
@@ -53,7 +59,7 @@ LIVE 的能力。
 | “建议买多少” | 生成建议计划 | `propose-trade` | 是 | 展示权重、plan_hash，等待用户决策 |
 | “申请审批这个计划” | 创建待审批请求 | `request-approval` | 是 | 结果只能是 PENDING |
 | “为什么建议这笔交易” | 解释证据 | `explain-decision` | 否 | 引用策略、数据、政策和审计 ID |
-| “直接帮我买” | 不直接下单 | 先 `propose-trade` | 否/计划写入 | 明确要求真实用户审批，保持 PAPER |
+| “直接帮我买” | 不直接跳过审批 | 先 `propose-trade`；明确要求 LIVE 时再走审批链 | 计划写入 | 展示计划和 hash；保持 PENDING，等待可信人工审批 |
 
 用户只提出分析、解释或 review 时，不要扩大为关注、同步账户、创建计划或申请审批。
 
@@ -163,7 +169,7 @@ printf '%s' '{"equity":100000,"account_id":"default","mode":"DRY_RUN"}' |
 ### 3.5 request-approval
 
 ```json
-{"plan_id":"plan_xxx"}
+{"plan_id":"plan_xxx","plan_hash":"hash_xxx","idempotency_key":"approval-001"}
 ```
 
 ```bash
@@ -280,8 +286,9 @@ Agent 永远不得：
 - 在账户 STALE/UNKNOWN、订单 UNKNOWN、对账 MISMATCH 时继续提交；
 - 创建 Live Canary 或在自动验收中运行真实订单。
 
-若用户明确要求真实交易，先读取 `docs/live-trading-checklist.md`，报告当前
-`DRY_RUN_ONLY` 状态并停在需要真实用户/独立 executiond 完成的审批边界。
+若用户明确要求真实交易，先读取 `docs/live-trading-checklist.md`，确认 P0-A/P0-B 状态。
+没有生产部署验收、账户同步、可信人工审批和 Canary 范围时，只能创建
+`PENDING_APPROVAL` 计划，不能调用 `execute`。
 
 ## 9. Agent 对用户的标准回答结构
 
