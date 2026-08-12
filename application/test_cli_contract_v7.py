@@ -122,7 +122,8 @@ def test_canonical_approve_mints_live_only_from_verified_proof(monkeypatch):
 def test_canonical_approve_rejects_string_approval_and_expired_confirmation(monkeypatch):
     core = dbm.get_core_conn(":memory:")
     execution = dbm.get_execution_conn(":memory:")
-    plan = _live_plan(expires_at="2000-01-01T00:00:00Z")
+    # Keep the plan valid so this case isolates an expired confirmation.
+    plan = _live_plan(expires_at="2099-12-31T23:59:59Z")
     _persist(core, plan)
     secret = "d" * 32
     verifier = HMACIdentityVerifier(secret, {"cli-owner": "owner"})
@@ -146,7 +147,7 @@ def test_canonical_approve_rejects_string_approval_and_expired_confirmation(monk
             "approval_proof": _canonical_proof(verifier, pending),
         })
 
-    # A live plan can expire before its independently-scoped confirmation.
+    # A live plan expiry is reported before confirmation expiry.
     plan_only_expired = _live_plan(
         plan_id="plan_only_expired", expires_at="2000-01-01T00:00:00Z")
     _persist(core, plan_only_expired)
