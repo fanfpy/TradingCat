@@ -323,8 +323,8 @@ class ExecutionService:
         if plan is None:
             raise PlanNotFoundError(f"execution plan 不存在: {plan_id}")
         audit = self.execution_conn.execute(
-            "SELECT payload_json, created_at FROM audit_log WHERE event='RECONCILE' "
-            "AND entity_type='plan' AND entity_id=? ORDER BY audit_id DESC LIMIT 1",
+            "SELECT payload_json, ts FROM audit_log WHERE event='RECONCILE' "
+            "AND entity_type='plan' AND entity_id=? ORDER BY id DESC LIMIT 1",
             (plan_id,),
         ).fetchone()
         payload = json.loads(audit["payload_json"]) if audit is not None else None
@@ -332,7 +332,7 @@ class ExecutionService:
             "plan_id": plan_id,
             "mode": plan.execution_mode,
             "last_reconciliation": payload,
-            "reconciled_at": audit["created_at"] if audit is not None else None,
+            "reconciled_at": audit["ts"] if audit is not None else None,
             "unknown_outcome": any(
                 intent["status"] == "UNKNOWN"
                 for intent in dbm.list_intents(self.execution_conn, plan_id)

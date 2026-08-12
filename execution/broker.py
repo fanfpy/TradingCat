@@ -207,14 +207,9 @@ class Reconciliation:
     def reconcile_plan(self, plan_id: str) -> Dict:
         intents = dbm.list_intents(self.execution_conn, plan_id)
         plan = dbm.get_plan(self.execution_conn, plan_id)
-        if plan is None:
-            raise ValueError(f"execution plan 不存在: {plan_id}")
         account_id = plan["account_id"] if plan is not None else "default"
-        if plan["execution_mode"] == "PAPER":
+        if plan is not None and plan["execution_mode"] == "PAPER":
             return self._reconcile_paper_plan(plan_id, intents)
-        if plan["execution_mode"] != "LIVE":
-            raise ValueError(
-                "reconciliation 只接受 PAPER 或 LIVE 计划")
         mismatches: List[str] = []
         for it in intents:
             broker_order_id = it["broker_order_id"] or ""
