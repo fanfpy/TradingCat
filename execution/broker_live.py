@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared import db as dbm
 from execution.models import APPROVAL_PROOF_CHANNEL
+from execution.state import set_intent_status
 
 
 # ────────────────────────────────────────────────────────────────
@@ -360,6 +361,8 @@ class LiveBroker:
                 continue
             snapshot = self.order_state(broker_order_id)
             if snapshot is None:
+                set_intent_status(self.conn, row["intent_id"], "UNKNOWN",
+                                  broker_order_id)
                 errors.append(f"broker 无订单 {broker_order_id}")
                 continue
             if self._apply_order_snapshot(snapshot, intent=dict(row)):
@@ -416,8 +419,8 @@ class LiveBroker:
         elif status == "SUBMITTED":
             self.on_submitted(base)
         else:
-            dbm.set_intent_status(self.conn, intent["intent_id"], "UNKNOWN",
-                                  base["broker_order_id"])
+            set_intent_status(self.conn, intent["intent_id"], "UNKNOWN",
+                              base["broker_order_id"])
         return True
 
     def order_state(self, broker_order_id: str) -> Optional[Dict]:

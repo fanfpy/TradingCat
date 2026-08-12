@@ -1,6 +1,7 @@
 """Longbridge SDK 能力/凭证诊断；绝不调用 OAuth，也绝不提交订单。"""
 
 from importlib.metadata import PackageNotFoundError, version
+import os
 from pathlib import Path
 import sys
 from typing import Dict
@@ -19,6 +20,12 @@ def diagnose_longbridge(*, connect: bool = False,
     result = {
         "sdk": "longbridge", "required_version": LONG_BRIDGE_SDK_VERSION,
         "installed": False, "version": None, "credentials": {},
+        "scope_policy": {
+            "positions": "trade",
+            "quotes": "quote",
+            "separate_credentials_enforced": (
+                os.environ.get("TRADINGCAT_REQUIRE_SEPARATE_CREDENTIALS") == "1"),
+        },
         "capabilities": {}, "connectivity": "NOT_RUN",
         "fundamental_connectivity": "NOT_RUN",
         "credentials_required": require_credentials,

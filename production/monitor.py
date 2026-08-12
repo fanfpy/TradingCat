@@ -519,7 +519,7 @@ def _realtime_portfolio(client=None) -> Optional[List[Dict]]:
               file=sys.stderr)
         return None
     try:
-        client = client or LongbridgeClient()
+        client = client or LongbridgeClient(scope="trade")
         positions = client.positions()
         return positions if isinstance(positions, list) else []
     except Exception as e:
@@ -755,17 +755,24 @@ if __name__ == "__main__":
     rt_positions: Optional[List[Dict]] = None
     rt_map: Dict[str, Dict] = {}
     lb_error = False
-    lb_client = None
-    # 同一轮监控复用一个 SDK client，避免持仓、保护单和行情各自重复认证。
+    trade_client = None
+    quote_client = None
+    # 交易域和行情域显式分离；同一轮内各自复用，避免隐式跨域调用。
     if args.scope != "watchlist" or args.command in ("pre", "intra"):
         try:
             from shared.longbridge_client import LongbridgeClient
-            lb_client = LongbridgeClient()
+            trade_client = LongbridgeClient(scope="trade")
         except Exception as exc:
-            print(f"[错误] 长桥监控快照初始化失败: {exc}", file=sys.stderr)
+            print(f"[错误] 长桥交易监控快照初始化失败: {exc}", file=sys.stderr)
             lb_error = True
-    if args.symbol is None and args.scope != "watchlist" and lb_client is not None:
-        rt_positions = _realtime_portfolio(lb_client)
+    if args.command in ("pre", "intra"):
+        try:
+            from shared.longbridge_client import LongbridgeClient
+            quote_client = LongbridgeClient(scope="quote")
+        except Exception as exc:
+            print(f"[错误] 长桥行情监控快照初始化失败: {exc}", file=sys.stderr)
+    if args.symbol is None and args.scope != "watchlist" and trade_client is not None:
+        rt_positions = _realtime_portfolio(trade_client)
         if rt_positions is None:
             lb_error = True
         else:
@@ -810,18 +817,20 @@ if __name__ == "__main__":
     quote_map: Dict[str, Dict] = {}
     protective_symbols: Optional[List[str]] = None
     realtime_errors = []
-    if lb_client is not None and symbols and args.command in ("pre", "intra"):
+    if quote_client is not None and symbols and args.command in ("pre", "intra"):
         try:
-            quote_map = {q["symbol"]: q for q in lb_client.quotes(symbols) if q.get("symbol")}
+            quote_map = {q["symbol"]: q for q in quote_client.quotes(symbols)
+                         if q.get("symbol")}
         except Exception as exc:
             print(f"[错误] 长桥实时行情快照失败: {exc}", file=sys.stderr)
             realtime_errors.append({
                 "error_type": type(exc).__name__, "error_message": str(exc),
                 "retryable": bool(getattr(exc, "retryable", False)),
             })
+    if trade_client is not None and symbols and args.command in ("pre", "intra"):
         try:
             protective_symbols = sorted({
-                order.get("symbol", "") for order in lb_client.stop_orders()
+                order.get("symbol", "") for order in trade_client.stop_orders()
                 if order.get("symbol")
             })
         except Exception as exc:

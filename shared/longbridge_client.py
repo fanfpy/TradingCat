@@ -11,7 +11,7 @@
 使用方式：
   from longbridge_client import LongbridgeClient
   
-  client = LongbridgeClient()              # 自动识别环境并认证
+  client = LongbridgeClient(scope="both") # 显式使用共享单账户域
   data = client.quote("TSLA.US")           # 单行情
   datas = client.quotes(["TSLA.US", "NVDA.US"])  # 多路行情
   pos = client.positions()                 # 持仓
@@ -165,6 +165,11 @@ class EnvironmentAdapter:
         EnvironmentAdapter._load_env_file(path)
         if scope not in ("quote", "trade", "both"):
             raise ValueError("Longbridge credential scope 必须是 quote/trade/both")
+        if (scope == "both"
+                and os.environ.get("TRADINGCAT_REQUIRE_SEPARATE_CREDENTIALS") == "1"):
+            raise RuntimeError(
+                "已要求凭证隔离，必须显式使用 scope='quote' 或 scope='trade'；"
+                "禁止创建未分域的 both 客户端")
         prefix = "" if scope == "both" else f"{scope.upper()}_"
         scoped = {
             "app_key": os.environ.get(f"LONGBRIDGE_{prefix}APP_KEY", ""),
@@ -498,41 +503,8 @@ class LongbridgeClient:
                         'currency': pos.currency if hasattr(pos, 'currency') else 'USD',
                         'market': channel.account_channel if hasattr(channel, 'account_channel') else '',
                     })
-            # 补充实时行情 (last_price, unrealized_pnl)
-            if positions:
-                symbols = [p['symbol'] for p in positions]
-                try:
-                    quotes_list = self.quotes(symbols)
-                    # 转为dict (key=symbol)
-                    quotes_dict = {}
-                    for q in quotes_list:
-                        sym = q.get('symbol', '')
-                        if sym:
-                            quotes_dict[sym] = q
-                    for p in positions:
-                        sym = p['symbol']
-                        if sym in quotes_dict:
-                            q = quotes_dict[sym]
-                            p['last_price'] = str(float(q.get('last', 0)))
-                            # 计算unrealized_pnl_pct
-                            cost = float(p['cost_price'])
-                            last = float(p['last_price'])
-                            if cost > 0:
-                                p['unrealized_pnl_pct'] = str(round((last - cost) / cost * 100, 2))
-                            else:
-                                p['unrealized_pnl_pct'] = '0'
-                        else:
-                            p['last_price'] = '0'
-                            p['unrealized_pnl_pct'] = '0'
-                except Exception as exc:
-                    if strict:
-                        raise
-                    logger.warning(
-                        "position quote degrade error_type=%s message=%s",
-                        type(exc).__name__, exc)
-                    for p in positions:
-                        p['last_price'] = '0'
-                        p['unrealized_pnl_pct'] = '0'
+            # 持仓是交易域的账户事实；行情字段由调用方显式使用 quote scope 查询。
+            # 这里不能为了补充 last_price 隐式创建/依赖 QuoteContext。
             return positions
         except Exception as exc:
             return _provider_failure(exc, "positions", None, strict, [])
@@ -1542,7 +1514,7 @@ class LongbridgeClient:
 ║                                                              ║
 ║ 3. 使用 longbridge_client:                                   ║
 ║    from longbridge_client import LongbridgeClient            ║
-║    client = LongbridgeClient()  # 自动读取 SDK 三凭证       ║
+║    client = LongbridgeClient(scope="both")                 ║
 ║    client.positions()                                        ║
 ║                                                              ║
 ║ 注意：不读取 CLI OAuth token/Region，也不会启动浏览器认证。  ║
@@ -1586,8 +1558,18 @@ def main():
         LongbridgeClient.help(topic)
         sys.exit(0)
 
+    quote_commands = {"quote", "quotes", "kline", "vix", "sentiment", "watchlist"}
+    trade_commands = {
+        "positions", "assets", "cash_flow", "orders", "stop_orders",
+        "buy", "sell", "stop_loss", "cancel",
+    }
+    if cmd not in quote_commands | trade_commands:
+        print(f"❌ 未知命令: {cmd}")
+        print("可用命令: quote, quotes, positions, assets, vix, sentiment, buy, sell, stop_loss, cancel, orders, kline, watchlist, help")
+        sys.exit(1)
     try:
-        client = LongbridgeClient()
+        client_scope = "quote" if cmd in quote_commands else "trade"
+        client = LongbridgeClient(scope=client_scope)
     except Exception as e:
         print(f"❌ 认证失败: {e}", file=sys.stderr)
         sys.exit(1)

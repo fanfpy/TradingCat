@@ -127,6 +127,11 @@ class Confirmation:
     expires_at: Optional[str] = None
     created_at: Optional[str] = None
 
+    def is_expired(self, at: Optional[str] = None) -> bool:
+        """到期瞬间即失效，与 ExecutionPlan 使用同一边界规则。"""
+        return bool(self.expires_at and
+                    parse_ts(self.expires_at) <= parse_ts(at or now_utc()))
+
     def to_dict(self) -> Dict:
         return asdict(self)
 

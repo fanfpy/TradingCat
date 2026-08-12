@@ -243,6 +243,48 @@ def test_strict_separate_credentials_fail_closed(monkeypatch, tmp_path):
         lb.EnvironmentAdapter.load_credentials(scope="trade")
 
 
+def test_both_scope_is_rejected_when_separate_credentials_are_required(monkeypatch):
+    _clear_longbridge_env(monkeypatch)
+    monkeypatch.setenv("TRADINGCAT_REQUIRE_SEPARATE_CREDENTIALS", "1")
+    monkeypatch.setenv("LONGBRIDGE_APP_KEY", "app-key")
+    monkeypatch.setenv("LONGBRIDGE_APP_SECRET", "app-secret")
+    monkeypatch.setenv("LONGBRIDGE_ACCESS_TOKEN", "legacy-token")
+
+    with pytest.raises(RuntimeError, match="scope='quote'.*scope='trade'"):
+        lb.EnvironmentAdapter.load_credentials(scope="both")
+
+
+def test_non_empty_positions_do_not_require_quote_context():
+    client = object.__new__(lb.LongbridgeClient)
+
+    class TradeContext:
+        def stock_positions(self):
+            return type("Response", (), {"channels": [
+                type("Channel", (), {
+                    "account_channel": "US",
+                    "positions": [type("Position", (), {
+                        "symbol": "AAPL.US", "quantity": "2",
+                        "available_quantity": "2", "cost_price": "90",
+                        "currency": "USD",
+                    })()],
+                })(),
+            ]})()
+
+    class FailingQuoteContext:
+        def quote(self, symbols):
+            raise AssertionError("positions() must not call QuoteContext")
+
+    client._trade_ctx = TradeContext()
+    client._quote_ctx = FailingQuoteContext()
+
+    positions = client.positions()
+
+    assert positions == [{
+        "symbol": "AAPL.US", "quantity": "2", "available_quantity": "2",
+        "cost_price": "90.0", "currency": "USD", "market": "US",
+    }]
+
+
 def test_client_preserves_sdk_endpoint_with_scoped_context(monkeypatch, tmp_path):
     _clear_longbridge_env(monkeypatch)
     env_file = tmp_path / "sdk.env"

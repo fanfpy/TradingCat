@@ -93,7 +93,7 @@ def evaluate(plan: ExecutionPlan, confirmation: Confirmation,
     # 3. 过期
     if plan.is_expired():
         reasons.append(f"plan 已过期（expires_at={plan.expires_at}）")
-    if confirmation.expires_at and parse_ts(confirmation.expires_at) <= parse_ts(now_utc()):
+    if confirmation.is_expired():
         reasons.append(f"confirmation 已过期（expires_at={confirmation.expires_at}）")
     # 4. AccountState（D-7 硬条件）
     if account_state is None:

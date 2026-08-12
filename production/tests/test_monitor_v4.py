@@ -1,10 +1,12 @@
 import math
 
 from production.monitor import (
-    _completed_bar_freshness, intraday_check, pre_market_check, reset_alert_log,
+    _completed_bar_freshness, _realtime_portfolio, intraday_check,
+    pre_market_check, reset_alert_log,
 )
 from production.notification import AuditNotificationAdapter, Notification
 from shared import db as dbm
+from shared import longbridge_client as lb
 
 
 def _fixture():
@@ -108,3 +110,19 @@ def test_longbridge_bar_without_calendar_fails_closed():
         conn, "A.US", "2026-08-08", "2026-08-09")
     assert not fresh
     assert "交易日历未覆盖" in reason
+
+
+def test_realtime_portfolio_default_client_has_trade_scope(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *, scope):
+            calls.append(scope)
+
+        def positions(self):
+            return [{"symbol": "AAPL.US", "quantity": "2"}]
+
+    monkeypatch.setattr(lb, "LongbridgeClient", FakeClient)
+
+    assert _realtime_portfolio() == [{"symbol": "AAPL.US", "quantity": "2"}]
+    assert calls == ["trade"]

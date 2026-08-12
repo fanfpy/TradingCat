@@ -18,9 +18,12 @@ Reconciliation：broker/local 对账。
   AccountState.sync_status = MISMATCH，且后续 PreTradeRisk 必然 REJECT
 """
 
+import hashlib
+import json
 from typing import Dict, List, Optional
 
 from shared import db as dbm
+from execution.state import set_intent_status
 
 
 def normalize_broker_status(status: object) -> str:
@@ -70,14 +73,14 @@ class BrokerEventHandler:
     def _on_submitted(self, e: Dict) -> None:
         intent_id = e["intent_id"]
         broker_order_id = e.get("broker_order_id")
-        dbm.set_intent_status(self.conn, intent_id, "SUBMITTED", broker_order_id)
+        set_intent_status(self.conn, intent_id, "SUBMITTED", broker_order_id)
         self._upsert_broker_order(intent_id, broker_order_id, e)
         dbm.audit(self.conn, "BROKER_ORDER", entity_type="intent", entity_id=str(intent_id),
                   payload={"event": "submitted", "broker_order_id": broker_order_id})
 
     def _on_rejected(self, e: Dict) -> None:
         intent_id = e["intent_id"]
-        dbm.set_intent_status(self.conn, intent_id, "REJECTED", e.get("broker_order_id"))
+        set_intent_status(self.conn, intent_id, "REJECTED", e.get("broker_order_id"))
         self._upsert_broker_order(intent_id, e.get("broker_order_id"), e)
         dbm.audit(self.conn, "BROKER_ORDER", entity_type="intent", entity_id=str(intent_id),
                   payload={"event": "rejected", "reason": e.get("reason")})
@@ -89,26 +92,86 @@ class BrokerEventHandler:
         """
         intent_id = e["intent_id"]
         with dbm.immediate_transaction(self.conn):
+            row = dbm.get_intent(self.conn, intent_id)
+            if row is None:
+                raise ValueError(f"intent 不存在: {intent_id}")
+            if row["status"] in ("REJECTED", "CANCELLED"):
+                dbm.audit(self.conn, "FILL_IGNORED", entity_type="intent",
+                          entity_id=str(intent_id),
+                          payload={"reason": "terminal_non_filled", "status": row["status"],
+                                   "event": e}, commit=False)
+                return
+            requested = float(e["quantity"])
+            if requested <= 0:
+                dbm.audit(self.conn, "FILL_IGNORED", entity_type="intent",
+                          entity_id=str(intent_id),
+                          payload={"reason": "non_positive_quantity", "event": e},
+                          commit=False)
+                return
+
+            # Prefer the broker's stable execution id.  Older adapters do not
+            # provide one, so retain a deterministic fingerprint in audit_log.
+            # The marker is written in this same transaction, making duplicate
+            # delivery idempotent across process restarts.
+            identity = (e.get("event_id") or e.get("execution_id") or
+                        e.get("trade_id") or e.get("fill_id"))
+            if identity is None:
+                identity = hashlib.sha256(json.dumps({
+                    "broker_order_id": e.get("broker_order_id") or f"fill_{intent_id}",
+                    "symbol": e["symbol"], "side": e["side"],
+                    "quantity": requested, "price": e["price"],
+                    "filled_at": e.get("filled_at"),
+                }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            dedupe_key = str(identity)
+            duplicate = self.conn.execute(
+                "SELECT 1 FROM audit_log WHERE event='FILL_DEDUPE' "
+                "AND entity_type='intent' AND entity_id=? "
+                "AND payload_json LIKE ? LIMIT 1",
+                (str(intent_id), f'%"dedupe_key": {json.dumps(dedupe_key)}%'),
+            ).fetchone()
+            if duplicate is not None:
+                dbm.audit(self.conn, "FILL_DUPLICATE_IGNORED", entity_type="intent",
+                          entity_id=str(intent_id),
+                          payload={"dedupe_key": dedupe_key}, commit=False)
+                return
+
+            filled_before = self.filled_quantity(intent_id)
+            remaining = max(0.0, float(row["quantity"]) - filled_before)
+            if remaining <= 1e-9:
+                dbm.audit(self.conn, "FILL_DUPLICATE_IGNORED", entity_type="intent",
+                          entity_id=str(intent_id),
+                          payload={"dedupe_key": dedupe_key, "reason": "already_filled"},
+                          commit=False)
+                return
+            quantity = min(requested, remaining)
+            if quantity < requested - 1e-9:
+                dbm.audit(self.conn, "FILL_CAPPED", entity_type="intent",
+                          entity_id=str(intent_id),
+                          payload={"dedupe_key": dedupe_key, "requested": requested,
+                                   "accepted": quantity, "order_quantity": row["quantity"]},
+                          commit=False)
             if e.get("broker_order_id"):
                 dbm.upsert_broker_order(
                     self.conn, intent_id, e["broker_order_id"], e, commit=False)
             dbm.insert_fill(
                 self.conn, intent_id, e.get("broker_order_id") or f"fill_{intent_id}",
-                e["symbol"], e["side"], e["quantity"], e["price"],
+                e["symbol"], e["side"], quantity, e["price"],
                 e.get("filled_at"), commit=False)
             row = dbm.get_intent(self.conn, intent_id)
             total = row["quantity"]
             filled = self.filled_quantity(intent_id)
             status = "FILLED" if filled >= total - 1e-9 else "SUBMITTED"
-            dbm.set_intent_status(
+            set_intent_status(
                 self.conn, intent_id, status, e.get("broker_order_id"), commit=False)
+            dbm.audit(self.conn, "FILL_DEDUPE", entity_type="intent", entity_id=str(intent_id),
+                      payload={"dedupe_key": dedupe_key}, commit=False)
             dbm.audit(self.conn, "FILL", entity_type="intent", entity_id=str(intent_id),
-                      payload={"quantity": e["quantity"], "price": e["price"],
+                      payload={"quantity": quantity, "price": e["price"],
                                "filled_total": filled, "intent_status": status}, commit=False)
 
     def _on_cancelled(self, e: Dict) -> None:
         intent_id = e["intent_id"]
-        dbm.set_intent_status(self.conn, intent_id, "CANCELLED", e.get("broker_order_id"))
+        set_intent_status(self.conn, intent_id, "CANCELLED", e.get("broker_order_id"))
         self._upsert_broker_order(intent_id, e.get("broker_order_id"), e)
         dbm.audit(self.conn, "BROKER_ORDER", entity_type="intent", entity_id=str(intent_id),
                   payload={"event": "cancelled"})
@@ -116,7 +179,7 @@ class BrokerEventHandler:
     def _on_changed(self, e: Dict) -> None:
         """券商回改（数量/价格）→ 更新 intent 参考信息 + 保持 SUBMITTED。"""
         intent_id = e["intent_id"]
-        dbm.set_intent_status(self.conn, intent_id, "SUBMITTED", e.get("broker_order_id"))
+        set_intent_status(self.conn, intent_id, "SUBMITTED", e.get("broker_order_id"))
         self._upsert_broker_order(intent_id, e.get("broker_order_id"), e)
         dbm.audit(self.conn, "BROKER_ORDER", entity_type="intent", entity_id=str(intent_id),
                   payload={"event": "changed", "raw": e})
@@ -155,14 +218,27 @@ class Reconciliation:
             if not broker_order_id:
                 if it["status"] != "PENDING":
                     mismatches.append(f"{it['client_request_id']} 缺 broker_order_id")
-                    dbm.set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN")
+                    set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN")
                 continue
             bo = self.broker.order_state(broker_order_id)
             if bo is None:
                 mismatches.append(f"{it['client_request_id']} broker 无此订单")
-                dbm.set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN")
+                set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN")
                 continue
             normalized = normalize_broker_status(bo.get("status"))
+            if normalized == "UNKNOWN":
+                set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN",
+                                  broker_order_id)
+                mismatches.append(
+                    f"{it['client_request_id']} broker 状态 UNKNOWN")
+                continue
+            if normalized not in ("PENDING", "SUBMITTING", "SUBMITTED", "FILLED",
+                                  "REJECTED", "CANCELLED", "UNKNOWN"):
+                set_intent_status(self.execution_conn, it["intent_id"], "UNKNOWN",
+                                  broker_order_id)
+                mismatches.append(
+                    f"{it['client_request_id']} broker 状态未知: {bo.get('status')}")
+                continue
             if normalized != it["status"] and not (
                     it["status"] == "SUBMITTING" and normalized == "SUBMITTED"):
                 mismatches.append(

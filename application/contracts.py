@@ -3,6 +3,7 @@
 import json
 import uuid
 from datetime import datetime
+from dataclasses import asdict
 from typing import Dict, Optional
 
 from production.monitor import post_market_check
@@ -51,11 +52,12 @@ class TradingCatApplication:
     """可被 CLI、Python、MCP/HTTP 或任意 Agent 调用的唯一用例层。"""
 
     def __init__(self, core_conn, execution_conn=None, fundamental_provider=None,
-                 security_provider=None):
+                 security_provider=None, *, seed_defaults=True):
         self.core = core_conn
         self.execution = execution_conn
         self.fundamental_provider = fundamental_provider
-        self._seed_security_master()
+        if seed_defaults:
+            self._seed_security_master()
         self.security_resolver = SecurityResolver(self.core, security_provider)
 
     def _seed_security_master(self) -> None:
@@ -263,9 +265,17 @@ class TradingCatApplication:
         )
 
     def propose_trade(self, equity: float, *, account_id: str = "default",
-                      mode: str = "DRY_RUN", as_of: Optional[str] = None,
+                      mode: str = "PAPER", as_of: Optional[str] = None,
                       account_state=None) -> Dict:
         from production.decision import run_decision, target_to_execution_plan
+
+        if mode not in ("DRY_RUN", "PAPER"):
+            return _envelope(
+                "ProposeTrade",
+                error={"code": "LIVE_DISABLED",
+                       "message": "application JSON 契约只允许 DRY_RUN 或 PAPER；LIVE 必须由独立 executiond 处理",
+                       "retryable": False},
+            )
 
         target = run_decision(self.core, equity, account_state, as_of)
         plan = target_to_execution_plan(
@@ -281,6 +291,81 @@ class TradingCatApplication:
             },
             warnings=[] if target.passed else ["组合风控未通过；新买入目标已归零"],
             lineage={"plan_id": plan.plan_id if plan else None},
+        )
+
+    def backtest(self, symbol: str, *, start: Optional[str] = None,
+                 end: Optional[str] = None, params: Optional[Dict] = None,
+                 cost_bps: float = 25, initial_cash: float = 100_000.0) -> Dict:
+        """只读单标的回测契约；不写计划、不访问券商、不授予交易资格。"""
+        from shared.backtest import run_backtest
+        bars = dbm.get_bars(self.core, symbol, start=start, end=end)
+        if not bars:
+            return _envelope(
+                "Backtest",
+                error={"code": "NO_MARKET_DATA",
+                       "message": f"本地没有 {symbol} 的 bars；请先缓存数据",
+                       "retryable": False},
+            )
+        chosen = dict(params or {"entry_mode": "hybrid", "ma_period": 50,
+                                 "atr_multiple": 3.0, "buffer": 0.01})
+        result = run_backtest(
+            symbol, [row["ts"] for row in bars],
+            [float(row["open"]) for row in bars],
+            [float(row["high"]) for row in bars],
+            [float(row["low"]) for row in bars],
+            [float(row["close"]) for row in bars], chosen,
+            cost_bps=float(cost_bps), initial_cash=float(initial_cash))
+        return _envelope(
+            "Backtest",
+            data={"symbol": symbol, "start": bars[0]["ts"], "end": bars[-1]["ts"],
+                  "bar_count": len(bars), "params": chosen,
+                  "stats": result.stats(),
+                  "trades": [asdict(trade) for trade in result.trades],
+                  "execution_mode": "RESEARCH_ONLY"},
+            warnings=["回测仅使用本地历史 bars；结果不构成交易资格或成交"],
+            lineage={"data_version": (dbm.get_manifest(self.core, symbol)["sha256"]
+                                      if dbm.get_manifest(self.core, symbol) else None)},
+        )
+
+    def status(self, *, account_id: str = "default",
+               symbol: Optional[str] = None) -> Dict:
+        """只读运行状态；显式公开安全默认，避免 Agent 猜测 LIVE 状态。"""
+        account = dbm.get_account(self.core, account_id)
+        lifecycle = dbm.get_lifecycle(self.core, symbol) if symbol else None
+        plans = [dict(row) for row in dbm.list_plans(self.core, limit=100)]
+        safe_account = None
+        if account is not None:
+            safe_account = {key: account[key] for key in (
+                "account_id", "sync_status", "cash", "buying_power", "nav",
+                "updated_at", "source", "source_version", "snapshot_version",
+                "last_success_at", "last_attempt_at", "last_error_type",
+                "last_error_message", "last_error_retryable") if key in account.keys()}
+        return _envelope(
+            "Status",
+            data={"account": safe_account, "symbol": symbol,
+                  "lifecycle": dict(lifecycle) if lifecycle is not None else None,
+                  "plans": plans,
+                  "safety": {"default_mode": "PAPER", "paper_is_local": True,
+                             "live_enabled": False, "live_submission": "DISABLED"}},
+            warnings=(["账户尚未 SYNCED；状态仅供诊断"]
+                      if account is None or account["sync_status"] != "SYNCED" else []),
+        )
+
+    def report(self, *, account_id: str = "default",
+               symbol: Optional[str] = None) -> Dict:
+        """只读报告摘要；不生成文件、不推送 webhook、不触达券商。"""
+        state = self.status(account_id=account_id, symbol=symbol)
+        pending = [dict(row) for row in dbm.list_notification_outbox(
+            self.core, status="PENDING", limit=100)]
+        positions = [dict(row) for row in dbm.list_positions(self.core)]
+        if symbol:
+            positions = [row for row in positions if row.get("symbol") == symbol]
+        return _envelope(
+            "Report",
+            data={"account_id": account_id, "symbol": symbol,
+                  "status": state["data"], "positions": positions,
+                  "pending_notifications": pending, "delivery": "LOCAL_ONLY"},
+            warnings=["报告为本地只读摘要；没有远程推送或交易副作用"],
         )
 
     def request_approval(self, plan_id: str) -> Dict:

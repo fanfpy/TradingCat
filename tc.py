@@ -282,7 +282,7 @@ def cmd_portfolio(args) -> int:
 
 def cmd_trade(args, confirm_input=None, live_confirm_input=None, _conn=None,
               _quote_provider=None, _broker=None, _execution_conn=None) -> int:
-    """下单：交互式确认 → Execution 安全链（默认 DRY_RUN，不触达券商）。
+    """下单：交互式确认 → Execution 安全链（默认 PAPER，不触达券商）。
 
     从占位建议升级为完整安全链（US-004）：
         ExecutionPlan(plan_hash) → 展示订单详情 → y/N 确认 →
@@ -558,7 +558,7 @@ def _run_trade_order(conn, symbol: str, qty: float, mode: str,
                      confirm_input=None, quote_provider=None,
                      enable_live: bool = False, live_confirm_input=None,
                      broker=None, execution_conn=None) -> int:
-    """完整交互式安全链（DRY_RUN 默认；LIVE 必须显式三重解锁）。
+    """完整交互式安全链（PAPER 默认；LIVE 必须显式三重解锁）。
 
     - 生成 ExecutionPlan + PENDING Confirmation → 展示订单详情 → y/N 确认
     - y → ApprovalAdapter(APPROVED, cli, nonce 随机) → PreTradeRisk → consume（OrderIntent）
@@ -812,20 +812,20 @@ def main():
     p_portfolio = sub.add_parser("portfolio", help="目标组合构建")
     portfolio_sub = p_portfolio.add_subparsers(dest="portfolio_cmd", required=True)
     p_build = portfolio_sub.add_parser("build", help="运行 SIG→SIZE→TP→PR→EP")
-    p_build.add_argument("--mode", choices=["DRY_RUN", "PAPER", "LIVE"], default="DRY_RUN")
+    p_build.add_argument("--mode", choices=["DRY_RUN", "PAPER", "LIVE"], default="PAPER")
     p_build.add_argument("--dry-run", action="store_true", help="强制 DRY_RUN")
     p_build.add_argument("--equity", type=_positive_float, default=None,
                          help="账户 NAV 不可用时显式提供权益（仅建议/DRY_RUN）")
 
     # trade
-    p_trade = sub.add_parser("trade", help="下单（交互式确认，默认 DRY_RUN）")
+    p_trade = sub.add_parser("trade", help="下单（交互式确认，默认 PAPER）")
     t_sub = p_trade.add_subparsers(dest="cmd", required=True)
     t_order = t_sub.add_parser("order", help="拟议订单（生成 ExecutionPlan → y/N 确认 → 安全链）")
     t_order.add_argument("--symbol", required=True)
     t_order.add_argument("--qty", type=_positive_float, required=True,
                          help="数量（必须 > 0）")
-    t_order.add_argument("--mode", choices=["DRY_RUN", "PAPER", "LIVE"], default="DRY_RUN",
-                         help="DRY_RUN 默认；PAPER 仅本地纸面路由，不触达券商")
+    t_order.add_argument("--mode", choices=["DRY_RUN", "PAPER", "LIVE"], default="PAPER",
+                         help="PAPER 默认；DRY_RUN 仅创建模拟意图；PAPER 仅本地纸面路由")
     t_order.add_argument("--enable-live", action="store_true",
                          help="显式解锁 LIVE；仍需交互确认和精确短语")
     t_plan = t_sub.add_parser("plan", help="确认并执行已持久化的同一个 ExecutionPlan")

@@ -66,6 +66,9 @@ JSON 契约比终端文本稳定，响应统一为：
 
 Agent 必须展示 `warnings`，不能把缺失数据解释为零，也不能把“关注”解释为“可以买入”。
 
+稳定短入口是 `analyze`、`backtest`、`propose`、`paper`、`status` 和 `report`。`propose`
+默认使用本地 PAPER 语义，`paper` 强制 PAPER；两者收到 `mode=LIVE` 都返回 `LIVE_DISABLED`。
+
 ## 3. 分析一只股票
 
 首次研究建议按顺序执行：
@@ -176,10 +179,10 @@ printf '{"equity":100000,"account_id":"default","mode":"DRY_RUN"}' |
 返回的 `execution_plan` 是不可变建议，不是成交。`requires_explicit_human_approval=true`
 表示后续必须由真实用户审批指定的 `plan_hash`。
 
-仅用于 DRY_RUN 的人工演练：
+仅用于本地 PAPER 的人工演练：
 
 ```bash
-./tc trade order --symbol AAPL.US --qty 1 --mode DRY_RUN
+./tc trade order --symbol AAPL.US --qty 1
 ```
 
 该命令会展示完整计划并请求 y/N，但不会触达券商。LIVE CLI 即使输入确认短语也不能

@@ -26,6 +26,7 @@ from execution.models import (
 )
 from shared import db as dbm
 from execution.persistence import insert_plan
+from execution.state import set_intent_status
 
 
 # ────────────────────────────────────────────────────────────────
@@ -164,7 +165,7 @@ class OrderManager:
             if (plan.execution_mode == "LIVE"
                     and row["approval_channel"] != APPROVAL_PROOF_CHANNEL):
                 raise RuntimeError("LIVE confirmation 未绑定已验证 ApprovalProof")
-            if row["expires_at"] and parse_ts(row["expires_at"]) < parse_ts(now_utc()):
+            if Confirmation(**dict(row)).is_expired():
                 raise RuntimeError("confirmation 已过期")
             if plan.is_expired():
                 raise RuntimeError("plan 已过期")
@@ -223,6 +224,13 @@ class OrderManager:
         幂等：intents 已存在就直接返回（绝不重新创建）。
         """
         existing = dbm.list_intents(self.conn, plan_id)
+        for row in existing:
+            if row["status"] == "SUBMITTING" and not row["broker_order_id"]:
+                # Crash window: SUBMITTING is persisted before the broker call.
+                # Without a broker id we cannot prove whether a submission
+                # happened, so never retry; reconciliation must resolve it.
+                set_intent_status(self.conn, row["intent_id"], "UNKNOWN")
+        existing = dbm.list_intents(self.conn, plan_id)
         if existing:
             return [dict(r) for r in existing]
         return []
@@ -279,23 +287,27 @@ class OrderManager:
 
         created = self.consume(plan, confirmation)
         if plan.execution_mode in ("PAPER", "LIVE"):
+            # A process may have died after persisting SUBMITTING and before
+            # receiving the broker ack.  Recovery is fail-closed and never
+            # submits that intent a second time.
+            self.recover(plan.plan_id)
             for intent in created:
                 stored = dbm.get_intent_by_request_id(self.conn, intent["client_request_id"])
                 if stored is None or stored["status"] != "PENDING":
                     continue
-                dbm.set_intent_status(self.conn, stored["intent_id"], "SUBMITTING")
+                set_intent_status(self.conn, stored["intent_id"], "SUBMITTING")
                 # US-007：确认 + 计划随链传入 broker（LiveBroker.submit 内部再断言
                 # confirmation 已 APPROVED 且已 CONSUMED，杜绝绕过确认的直通提交）
                 try:
                     ack = self.broker.submit_order(dict(stored), confirmation=confirmation, plan=plan)
                 except Exception:
-                    dbm.set_intent_status(self.conn, stored["intent_id"], "UNKNOWN")
+                    set_intent_status(self.conn, stored["intent_id"], "UNKNOWN")
                     dbm.close_live_canaries(
                         self.conn, "broker_submit_unknown_or_credential_error",
                         plan.account_id)
                     raise
-                dbm.set_intent_status(self.conn, stored["intent_id"], "SUBMITTED",
-                                      ack.broker_order_id)
+                set_intent_status(self.conn, stored["intent_id"], "SUBMITTED",
+                                  ack.broker_order_id)
                 # SDK 回调线程只负责入队；ack 落库后由当前线程安全消费。
                 if hasattr(self.broker, "drain_events"):
                     self.broker.drain_events()

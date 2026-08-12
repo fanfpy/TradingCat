@@ -6,7 +6,8 @@
 ## 1. 调用原则
 
 1. 把包含 `SKILL.md` 的目录作为 `TS_ROOT`，不要硬编码 QwenPaw 或当前服务器路径。
-2. 优先通过 `application.cli` 的 JSON stdin/stdout 契约调用业务用例。
+2. 优先通过 `application.cli` 的 JSON stdin/stdout 契约调用业务用例。稳定短操作名为
+   `analyze`、`backtest`、`propose`、`paper`、`status`、`report`；旧的带资源名操作仍兼容。
 3. 只有研究缓存、监控、账户同步、备份等运维动作才调用 `./tc`。
 4. 以退出码和 JSON envelope 共同判断结果；始终向用户展示 `warnings`。
 5. Agent 可以分析、关注、复核、提出计划和申请审批，不能批准或提交 LIVE 订单。
@@ -23,7 +24,24 @@ shell = false
 若项目虚拟环境不存在，先报告安装未完成，不要自行改用系统中不确定版本的 Longbridge
 SDK。正式支持版本固定为 `longbridge==4.4.3`。
 
-## 2. 意图分发表
+## 2. 稳定入口
+
+所有入口读取一个 JSON object，并在 stdout 输出一个 JSON envelope。退出码为：`0` 成功，
+`1` 业务/安全门失败，`2` 参数、JSON 或未知操作失败。
+
+| 操作 | 作用 | 安全边界 |
+|---|---|---|
+| `analyze` | 标的分析 | 只读分析 |
+| `backtest` | 本地 bars 回测 | 只读研究，不授予交易资格 |
+| `propose` | 组合建议与计划 | 默认 `PAPER`，不触达券商 |
+| `paper` | 本地纸面建议 | 强制 `PAPER`，不触达券商 |
+| `status` | 账户/计划/安全状态 | 只读，明确 `live_enabled=false` |
+| `report` | 本地状态摘要 | 只读、`LOCAL_ONLY` |
+
+`propose` 和 `paper` 收到 `mode=LIVE` 一律返回 `LIVE_DISABLED`；JSON 契约没有批准或提交
+LIVE 的能力。
+
+## 3. 意图分发表
 
 | 用户意图 | Agent 操作 | 接口 | 是否写数据 | 后续动作 |
 |---|---|---|---|---|
@@ -35,11 +53,11 @@ SDK。正式支持版本固定为 `longbridge==4.4.3`。
 | “建议买多少” | 生成建议计划 | `propose-trade` | 是 | 展示权重、plan_hash，等待用户决策 |
 | “申请审批这个计划” | 创建待审批请求 | `request-approval` | 是 | 结果只能是 PENDING |
 | “为什么建议这笔交易” | 解释证据 | `explain-decision` | 否 | 引用策略、数据、政策和审计 ID |
-| “直接帮我买” | 不直接下单 | 先 `propose-trade` | 否/计划写入 | 明确要求真实用户审批，保持 DRY_RUN |
+| “直接帮我买” | 不直接下单 | 先 `propose-trade` | 否/计划写入 | 明确要求真实用户审批，保持 PAPER |
 
 用户只提出分析、解释或 review 时，不要扩大为关注、同步账户、创建计划或申请审批。
 
-## 3. JSON Operations
+## 4. JSON Operations
 
 所有响应使用 `tradingcat.v1` envelope：
 
@@ -140,7 +158,7 @@ printf '%s' '{"equity":100000,"account_id":"default","mode":"DRY_RUN"}' |
 - `execution_plan=null`：没有可审批计划。
 - 有计划：展示完整订单、`plan_id`、`plan_hash`、失效时间和 lineage。
 - `requires_explicit_human_approval=true` 只表示需要审批，不表示已经批准。
-- Agent 默认只使用 `DRY_RUN`；不能根据用户含糊表述切换为 LIVE。
+- Agent 默认只使用 `PAPER`；不能根据用户含糊表述切换为 LIVE。
 
 ### 3.5 request-approval
 
