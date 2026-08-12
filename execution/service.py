@@ -17,6 +17,7 @@ from execution.models import (
 )
 from execution.approval_wechat import IdentityProof, IdentityVerifier
 from execution.broker_live import LiveBroker, UnknownOutcomeError
+from execution.broker import Reconciliation
 from execution.order_manager import OrderManager
 from execution.paper_broker import PaperBroker
 from shared.account import load as load_account_state
@@ -253,6 +254,103 @@ class ExecutionService:
             "SELECT status FROM system_readiness WHERE gate='P0_A'"
         ).fetchone()
         return row is not None and row["status"] == "PASS"
+
+    def health(self) -> dict:
+        """无副作用的 executiond 健康检查；不读取凭证、不连接券商。"""
+        try:
+            self.execution_conn.execute("SELECT 1").fetchone()
+            execution_store = "READY"
+        except Exception:
+            execution_store = "UNAVAILABLE"
+        try:
+            self.core_conn.execute("SELECT 1").fetchone()
+            core_store = "READY"
+        except Exception:
+            core_store = "UNAVAILABLE"
+        return {
+            "status": "OK" if execution_store == core_store == "READY" else "DEGRADED",
+            "execution_store": execution_store,
+            "core_store": core_store,
+            "live_submit_rpc": False,
+            "operations": ("request_confirmation", "approve", "reject", "execute",
+                           "execute_status", "readiness", "reconcile_status", "reconcile"),
+        }
+
+    def readiness(self) -> dict:
+        """返回 LIVE 前置门状态；该 RPC 不能修改 readiness 或 Canary。"""
+        row = self.execution_conn.execute(
+            "SELECT status, evidence_hash, accepted_at FROM system_readiness WHERE gate='P0_A'"
+        ).fetchone()
+        canaries = self.execution_conn.execute(
+            "SELECT COUNT(*) AS count FROM live_canary WHERE status='ACTIVE'"
+        ).fetchone()["count"]
+        return {
+            "status": "READY" if row is not None and row["status"] == "PASS" else "NOT_READY",
+            "p0_a": dict(row) if row is not None else {"status": "MISSING"},
+            "active_canaries": canaries,
+            "live_requirements": ("P0_A=PASS", "ACTIVE_CANARY", "ApprovalProof",
+                                  "PreTradeRisk=PASS"),
+        }
+
+    def execute_status(self, *, plan_id: str, confirmation_id: str) -> dict:
+        """只按不可变标识符查询执行状态，不接受订单字段或重试指令。"""
+        plan = self.get_snapshot(plan_id)
+        if plan is None:
+            raise PlanNotFoundError(f"execution plan 不存在: {plan_id}")
+        confirmation = dbm.get_confirmation(self.execution_conn, confirmation_id)
+        if confirmation is None:
+            raise ConfirmationNotFoundError(
+                f"execution confirmation 不存在: {confirmation_id}")
+        if (confirmation["plan_id"] != plan_id
+                or confirmation["plan_hash"] != plan.plan_hash):
+            raise PlanHashMismatchError("confirmation 与 execution plan 不匹配")
+        intents = [dict(intent) for intent in dbm.list_intents(self.execution_conn, plan_id)]
+        statuses = sorted({intent["status"] for intent in intents})
+        return {
+            "plan_id": plan_id,
+            "confirmation_id": confirmation_id,
+            "mode": plan.execution_mode,
+            "confirmation_status": confirmation["status"],
+            "intent_count": len(intents),
+            "intent_statuses": statuses,
+            "unknown_outcome": any(status == "UNKNOWN" for status in statuses),
+            "retry": False,
+        }
+
+    def reconcile_status(self, *, plan_id: str) -> dict:
+        """读取最近一次对账审计；不触发 broker 查询。"""
+        plan = self.get_snapshot(plan_id)
+        if plan is None:
+            raise PlanNotFoundError(f"execution plan 不存在: {plan_id}")
+        audit = self.execution_conn.execute(
+            "SELECT payload_json, created_at FROM audit_log WHERE event='RECONCILE' "
+            "AND entity_type='plan' AND entity_id=? ORDER BY audit_id DESC LIMIT 1",
+            (plan_id,),
+        ).fetchone()
+        payload = json.loads(audit["payload_json"]) if audit is not None else None
+        return {
+            "plan_id": plan_id,
+            "mode": plan.execution_mode,
+            "last_reconciliation": payload,
+            "reconciled_at": audit["created_at"] if audit is not None else None,
+            "unknown_outcome": any(
+                intent["status"] == "UNKNOWN"
+                for intent in dbm.list_intents(self.execution_conn, plan_id)
+            ),
+        }
+
+    def reconcile(self, *, plan_id: str) -> dict:
+        """触发单计划对账。PAPER 本地检查；LIVE 只能用已配置 broker 的只读查询。"""
+        plan = self.get_snapshot(plan_id)
+        if plan is None:
+            raise PlanNotFoundError(f"execution plan 不存在: {plan_id}")
+        if plan.execution_mode == "LIVE":
+            if not isinstance(self.broker, LiveBroker):
+                raise RuntimeError("LIVE reconciliation 需要已配置 LiveBroker")
+            if not self.broker.enable_order_queries:
+                raise RuntimeError("LIVE reconciliation 需要显式 enable_order_queries=True")
+        result = Reconciliation(self.core_conn, self.execution_conn, self.broker).reconcile_plan(plan_id)
+        return {"plan_id": plan_id, "mode": plan.execution_mode, **result}
 
     def execute(self, *, plan_id: str, confirmation_id: str) -> dict:
         """Execute the one narrow RPC boundary.

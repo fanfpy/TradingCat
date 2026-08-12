@@ -207,7 +207,14 @@ class Reconciliation:
     def reconcile_plan(self, plan_id: str) -> Dict:
         intents = dbm.list_intents(self.execution_conn, plan_id)
         plan = dbm.get_plan(self.execution_conn, plan_id)
+        if plan is None:
+            raise ValueError(f"execution plan 不存在: {plan_id}")
         account_id = plan["account_id"] if plan is not None else "default"
+        if plan["execution_mode"] == "PAPER":
+            return self._reconcile_paper_plan(plan_id, intents)
+        if plan["execution_mode"] != "LIVE":
+            raise ValueError(
+                "reconciliation 只接受 PAPER 或 LIVE 计划")
         mismatches: List[str] = []
         for it in intents:
             broker_order_id = it["broker_order_id"] or ""
@@ -249,6 +256,23 @@ class Reconciliation:
         dbm.audit(self.execution_conn, "RECONCILE", entity_type="plan", entity_id=plan_id,
                   payload={"ok": ok, "mismatches": mismatches})
         return {"ok": ok, "mismatches": mismatches}
+
+    def _reconcile_paper_plan(self, plan_id: str, intents) -> Dict:
+        """PAPER 对账只检查 execution store，绝不查询或连接券商。"""
+        mismatches: List[str] = []
+        for intent in intents:
+            if intent["status"] == "UNKNOWN":
+                mismatches.append(
+                    f"{intent['client_request_id']} PAPER outcome UNKNOWN")
+            elif intent["status"] in ("SUBMITTING", "SUBMITTED") and not (
+                    intent["broker_order_id"] or "").startswith("paper_"):
+                mismatches.append(
+                    f"{intent['client_request_id']} PAPER 缺本地 paper_order_id")
+                set_intent_status(self.execution_conn, intent["intent_id"], "UNKNOWN")
+        ok = not mismatches
+        dbm.audit(self.execution_conn, "RECONCILE", entity_type="plan", entity_id=plan_id,
+                  payload={"ok": ok, "mismatches": mismatches, "mode": "PAPER"})
+        return {"ok": ok, "mismatches": mismatches, "mode": "PAPER"}
 
     def reconcile_all(self) -> Dict:
         """批量对账所有含非终态订单的计划；任一失败即整体失败。"""

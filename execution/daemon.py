@@ -41,6 +41,8 @@ class ExecutionDaemon(_StreamServer):
         super().__init__(socket_path, _Handler)
 
     def dispatch(self, request):
+        if not isinstance(request, dict):
+            raise ValueError("RPC request 必须是 JSON object")
         operation = request.get("operation")
         if operation == "request_confirmation":
             return self.service.request_confirmation(
@@ -82,9 +84,33 @@ class ExecutionDaemon(_StreamServer):
                 confirmation_id=request["confirmation_id"],
             )
         if operation == "health":
-            return {"status": "P0_A_DRY_RUN_ONLY", "execute_rpc": True,
-                    "live_submit_rpc": False}
+            self._require_exact_fields(request, {"operation"})
+            return self.service.health()
+        if operation == "readiness":
+            self._require_exact_fields(request, {"operation"})
+            return self.service.readiness()
+        if operation == "execute_status":
+            self._require_exact_fields(request, {"operation", "plan_id", "confirmation_id"})
+            return self.service.execute_status(
+                plan_id=request["plan_id"], confirmation_id=request["confirmation_id"])
+        if operation in ("reconcile_status", "reconcile"):
+            self._require_exact_fields(request, {"operation", "plan_id"})
+            if operation == "reconcile_status":
+                return self.service.reconcile_status(plan_id=request["plan_id"])
+            return self.service.reconcile(plan_id=request["plan_id"])
         raise ValueError(f"unsupported operation: {operation}")
+
+    @staticmethod
+    def _require_exact_fields(request, allowed):
+        unexpected = sorted(set(request) - allowed)
+        missing = sorted(allowed - set(request))
+        if unexpected or missing:
+            detail = []
+            if missing:
+                detail.append("缺少=" + ",".join(missing))
+            if unexpected:
+                detail.append("禁止字段覆盖=" + ",".join(unexpected))
+            raise ValueError("RPC 字段不合法：" + "; ".join(detail))
 
 
 def main(argv=None) -> int:

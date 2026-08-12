@@ -11,6 +11,10 @@ from shared import db as dbm
 
 
 TERMINAL_INTENT_STATUSES = frozenset(("FILLED", "REJECTED", "CANCELLED"))
+INTENT_STATUSES = frozenset((
+    "PENDING", "SUBMITTING", "SUBMITTED", "FILLED", "REJECTED",
+    "CANCELLED", "UNKNOWN",
+))
 
 
 def set_intent_status(conn, intent_id: int, status: str,
@@ -26,6 +30,8 @@ def set_intent_status(conn, intent_id: int, status: str,
     row = dbm.get_intent(conn, intent_id)
     if row is None:
         raise ValueError(f"intent 不存在: {intent_id}")
+    if status not in INTENT_STATUSES:
+        raise ValueError(f"非法 intent 状态: {status}")
     current = row["status"]
     if current in TERMINAL_INTENT_STATUSES and status != current:
         if broker_order_id and not row["broker_order_id"]:

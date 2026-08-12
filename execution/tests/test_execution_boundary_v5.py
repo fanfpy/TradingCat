@@ -331,3 +331,82 @@ def test_daemon_approval_requires_and_binds_canonical_proof_claims(stores):
         "approval_proof": raw,
     })
     assert approved["status"] == "APPROVED"
+
+
+def test_daemon_health_readiness_and_status_rpcs_are_strictly_read_only(stores):
+    core, execution, verifier = stores
+    plan = _plan("p_rpc_status", "PAPER")
+    _persist_core(core, plan)
+    service = ExecutionService(core, execution, identity_verifier=verifier)
+    daemon = object.__new__(ExecutionDaemon)
+    daemon.service = service
+
+    health = daemon.dispatch({"operation": "health"})
+    assert health["status"] == "OK"
+    assert health["live_submit_rpc"] is False
+    readiness = daemon.dispatch({"operation": "readiness"})
+    assert readiness["status"] == "NOT_READY"
+    assert "ApprovalProof" in readiness["live_requirements"]
+
+    pending = service.request_confirmation(plan.plan_id)
+    result = daemon.dispatch({
+        "operation": "execute_status", "plan_id": plan.plan_id,
+        "confirmation_id": pending.confirmation_id,
+    })
+    assert result["intent_count"] == 0
+    assert result["retry"] is False
+
+    for operation, request in (
+            ("health", {"operation": "health", "quantity": 1}),
+            ("readiness", {"operation": "readiness", "symbol": "AAPL.US"}),
+            ("execute_status", {"operation": "execute_status", "plan_id": plan.plan_id,
+                                "confirmation_id": pending.confirmation_id, "side": "BUY"}),
+            ("reconcile", {"operation": "reconcile", "plan_id": plan.plan_id,
+                             "orders": []})):
+        with pytest.raises(ValueError, match="字段不合法|字段覆盖"):
+            daemon.dispatch(request)
+
+
+def test_reconcile_rpc_keeps_paper_local_and_live_requires_readonly_broker(stores):
+    core, execution, verifier = stores
+    paper = _plan("p_rpc_reconcile_paper", "PAPER")
+    live = _plan("p_rpc_reconcile_live", "LIVE")
+    _persist_core(core, paper)
+    _persist_core(core, live)
+    service = ExecutionService(core, execution, identity_verifier=verifier)
+    daemon = object.__new__(ExecutionDaemon)
+    daemon.service = service
+    service.read_and_snapshot_plan(paper.plan_id)
+    service.read_and_snapshot_plan(live.plan_id)
+
+    class BrokerMustNotBeCalled:
+        def order_state(self, broker_order_id):
+            raise AssertionError("PAPER reconciliation must not query a broker")
+
+    service.broker = BrokerMustNotBeCalled()
+    paper_result = daemon.dispatch({"operation": "reconcile", "plan_id": paper.plan_id})
+    assert paper_result["ok"] is True
+    assert paper_result["mode"] == "PAPER"
+    status = daemon.dispatch({"operation": "reconcile_status", "plan_id": paper.plan_id})
+    assert status["last_reconciliation"]["mode"] == "PAPER"
+
+    with pytest.raises(RuntimeError, match="LiveBroker"):
+        daemon.dispatch({"operation": "reconcile", "plan_id": live.plan_id})
+
+
+def test_reconcile_unknown_remains_fail_closed_and_is_visible_in_status(stores):
+    core, execution, verifier = stores
+    plan = _plan("p_rpc_reconcile_unknown", "PAPER")
+    service, approved = _prepare_execute(stores, plan, proof_nonce="rpc-reconcile")
+    daemon = object.__new__(ExecutionDaemon)
+    daemon.service = service
+    service.execute(plan_id=plan.plan_id, confirmation_id=approved.confirmation_id)
+    intent = dbm.list_intents(execution, plan.plan_id)[0]
+    from execution.state import set_intent_status
+    set_intent_status(execution, intent["intent_id"], "UNKNOWN")
+
+    result = daemon.dispatch({"operation": "reconcile", "plan_id": plan.plan_id})
+    assert result["ok"] is False
+    assert "UNKNOWN" in result["mismatches"][0]
+    status = daemon.dispatch({"operation": "reconcile_status", "plan_id": plan.plan_id})
+    assert status["unknown_outcome"] is True

@@ -58,6 +58,9 @@
       order type、reference price、slippage 和 expires_at。
 - [ ] 用户通过受信审批通道对准确的 `plan_hash` 提交 ApprovalProof。
 - [ ] executiond 验证身份、owner 映射、nonce、时效、plan hash 和 Canary 范围。
+- [ ] executiond 的 `health`、`readiness`、`execute_status`、`reconcile_status` 和
+      `reconcile` RPC 仅接受标识符；它们不能携带或覆盖订单字段。LIVE `reconcile`
+      必须显式启用只读订单查询；PAPER 对账仅检查本地 execution store。
 - [ ] executiond 重新同步账户和行情。
 - [ ] PreTradeRisk 只能 PASS/REJECT，不能缩量或修改订单。
 - [ ] PASS 后由 OrderManager 原子消费 Confirmation 并创建幂等 Intent。
