@@ -12,9 +12,14 @@ import uuid
 from typing import Optional
 
 from execution.models import (
-    APPROVAL_PROOF_CHANNEL, Confirmation, ExecutionPlan, PlanOrder, parse_ts,
+    APPROVAL_PROOF_CHANNEL, Confirmation, ExecutionPlan, MarketState, PlanOrder,
+    parse_ts,
 )
 from execution.approval_wechat import IdentityProof, IdentityVerifier
+from execution.broker_live import LiveBroker, UnknownOutcomeError
+from execution.order_manager import OrderManager
+from execution.paper_broker import PaperBroker
+from shared.account import load as load_account_state
 from shared import db as dbm
 from execution.persistence import insert_plan
 
@@ -66,12 +71,16 @@ class ExecutionService:
 
     def __init__(self, core_conn, execution_conn, *,
                  identity_verifier: Optional[IdentityVerifier] = None,
-                 require_separate: bool = True):
+                 require_separate: bool = True,
+                 broker=None, risk_limits=None, daily_loss=None):
         if require_separate:
             dbm.assert_separate_stores(core_conn, execution_conn)
         self.core_conn = core_conn
         self.execution_conn = execution_conn
         self.identity_verifier = identity_verifier
+        self.broker = broker
+        self.risk_limits = risk_limits
+        self.daily_loss = daily_loss
 
     def read_and_snapshot_plan(self, plan_id: str) -> ExecutionPlan:
         """按 id 读取 Core 计划，重新规范化并计算 hash，再复制到执行库。"""
@@ -225,3 +234,107 @@ class ExecutionService:
         if plan.plan_hash != row["plan_hash"]:
             raise RuntimeError("Canonical Plan Snapshot hash 校验失败")
         return plan
+
+    def _load_risk_inputs(self, plan: ExecutionPlan):
+        """从本地 Core 快照加载风控输入；绝不触发券商同步或网络访问。"""
+        account = load_account_state(self.core_conn, plan.account_id)
+        states = {}
+        for order in plan.orders:
+            row = dbm.get_market_state(self.core_conn, order.symbol)
+            if row is not None:
+                states[order.symbol] = MarketState(
+                    row["symbol"], row["quote_at"], float(row["price"]),
+                    int(row["max_age_seconds"]),
+                )
+        return account, states
+
+    def _live_deployment_ready(self) -> bool:
+        row = self.execution_conn.execute(
+            "SELECT status FROM system_readiness WHERE gate='P0_A'"
+        ).fetchone()
+        return row is not None and row["status"] == "PASS"
+
+    def execute(self, *, plan_id: str, confirmation_id: str) -> dict:
+        """Execute the one narrow RPC boundary.
+
+        The caller supplies identifiers only.  The immutable plan, confirmation,
+        account snapshot and quotes are read locally; no order fields are accepted
+        or merged from the request.
+        """
+        if not isinstance(plan_id, str) or not plan_id:
+            raise ValueError("execute.plan_id 必须是非空字符串")
+        if not isinstance(confirmation_id, str) or not confirmation_id:
+            raise ValueError("execute.confirmation_id 必须是非空字符串")
+
+        plan = self.get_snapshot(plan_id)
+        if plan is None:
+            raise ValueError(f"execution plan 不存在: {plan_id}")
+        row = dbm.get_confirmation(self.execution_conn, confirmation_id)
+        if row is None:
+            raise ValueError(f"execution confirmation 不存在: {confirmation_id}")
+        if row["plan_id"] != plan.plan_id:
+            raise RuntimeError("confirmation.plan_id 与 plan_id 不匹配")
+        if row["plan_hash"] != plan.plan_hash:
+            raise RuntimeError("confirmation.plan_hash 与 plan_hash 不匹配")
+        if row["approval_channel"] != APPROVAL_PROOF_CHANNEL:
+            raise RuntimeError("execute 只接受 approval-proof")
+        unknown = next(
+            (intent for intent in dbm.list_intents(self.execution_conn, plan.plan_id)
+             if intent["status"] == "UNKNOWN"),
+            None,
+        )
+        if unknown is not None:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "plan_id": plan.plan_id,
+                "confirmation_id": confirmation_id,
+                "message": "previous broker outcome is unknown; manual reconciliation required",
+                "retry": False,
+            }
+        if row["status"] != "APPROVED":
+            if row["status"] == "CONSUMED":
+                raise RuntimeError("confirmation 已消费，禁止自动重试")
+            raise RuntimeError(f"confirmation 状态 {row['status']} != APPROVED")
+
+        confirmation = Confirmation(**dict(row))
+        account_state, market_states = self._load_risk_inputs(plan)
+
+        if plan.execution_mode == "PAPER":
+            broker = self.broker or PaperBroker(self.execution_conn)
+            if not isinstance(broker, PaperBroker):
+                raise RuntimeError("PAPER 模式只允许本地 PaperBroker")
+        elif plan.execution_mode == "LIVE":
+            broker = self.broker
+            if not isinstance(broker, LiveBroker) or not broker.enable_live:
+                raise RuntimeError("LIVE 模式必须使用显式 enable_live=True 的 LiveBroker")
+            if broker.kill_switch_engaged:
+                raise RuntimeError("LIVE kill switch 已 engaged")
+            if not self._live_deployment_ready():
+                raise RuntimeError("LIVE 部署门禁未通过：需要 P0_A readiness=PASS")
+        else:
+            raise RuntimeError("execute 只接受 PAPER 或 LIVE 计划")
+
+        manager = OrderManager(
+            self.execution_conn, broker=broker,
+            risk_limits=self.risk_limits, daily_loss=self.daily_loss,
+        )
+        try:
+            intents = manager.submit(
+                plan, confirmation, market_states=market_states,
+                account_state=account_state,
+            )
+        except UnknownOutcomeError as exc:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "plan_id": plan.plan_id,
+                "confirmation_id": confirmation.confirmation_id,
+                "message": str(exc),
+                "retry": False,
+            }
+        return {
+            "status": "SUBMITTED",
+            "plan_id": plan.plan_id,
+            "confirmation_id": confirmation.confirmation_id,
+            "mode": plan.execution_mode,
+            "intents": intents,
+        }

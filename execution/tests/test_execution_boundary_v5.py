@@ -7,8 +7,11 @@ import time
 import pytest
 
 from execution.approval_wechat import HMACIdentityVerifier, IdentityProof
-from execution.models import Confirmation, ExecutionPlan, PlanOrder
+from execution.broker_live import LiveBroker
+from execution.daemon import ExecutionDaemon
+from execution.models import Confirmation, ExecutionPlan, PlanOrder, now_utc
 from execution.order_manager import OrderManager
+from execution.persistence import insert_plan
 from execution.service import ExecutionService
 from shared import db as dbm
 
@@ -24,9 +27,9 @@ def _plan(plan_id="p_boundary", mode="LIVE"):
 
 
 def _persist_core(conn, plan):
-    dbm.insert_plan(conn, plan.plan_id, plan.account_id, plan.execution_mode,
-                    plan.expires_at, plan.plan_hash,
-                    [order.to_dict() for order in plan.orders])
+    insert_plan(conn, plan.plan_id, plan.account_id, plan.execution_mode,
+                plan.expires_at, plan.plan_hash,
+                [order.to_dict() for order in plan.orders])
 
 
 def _proof(verifier, cfm, nonce="proof-nonce", action="approve", timestamp=None):
@@ -161,3 +164,96 @@ def test_live_rejects_same_physical_store(tmp_path):
     store = dbm.get_conn(str(tmp_path / "shared.db"))
     with pytest.raises(RuntimeError, match="物理隔离"):
         ExecutionService(store, store)
+
+
+def _prepare_execute(stores, plan, *, proof_nonce="execute-proof"):
+    core, execution, verifier = stores
+    _persist_core(core, plan)
+    service = ExecutionService(core, execution, identity_verifier=verifier)
+    pending = service.request_confirmation(plan.plan_id)
+    approved = service.approve(
+        pending.confirmation_id,
+        _proof(verifier, pending, nonce=proof_nonce),
+    )
+    dbm.upsert_account(
+        core, plan.account_id, "SYNCED", cash=100_000, buying_power=100_000,
+        nav=100_000,
+    )
+    dbm.upsert_market_state(core, "AAPL.US", now_utc(), 200.0,
+                            max_age_seconds=10**9)
+    return service, approved
+
+
+def test_execute_accepts_identifiers_only_and_routes_paper_locally(stores):
+    plan = _plan("p_execute_paper", "PAPER")
+    service, approved = _prepare_execute(stores, plan)
+
+    class StubService:
+        def execute(self, **kwargs):
+            raise AssertionError("execute with order overrides must be rejected first")
+
+    daemon = object.__new__(ExecutionDaemon)
+    daemon.service = StubService()
+    with pytest.raises(ValueError, match="禁止订单字段覆盖"):
+        daemon.dispatch({
+            "operation": "execute", "plan_id": plan.plan_id,
+            "confirmation_id": approved.confirmation_id, "quantity": 999,
+        })
+
+    result = service.execute(
+        plan_id=plan.plan_id, confirmation_id=approved.confirmation_id,
+    )
+    assert result["status"] == "SUBMITTED"
+    assert result["mode"] == "PAPER"
+    assert dbm.list_intents(stores[1], plan.plan_id)[0]["broker_order_id"].startswith("paper_")
+
+
+def test_execute_live_fails_closed_without_deployment_readiness(stores):
+    plan = _plan("p_execute_live_gate", "LIVE")
+    service, approved = _prepare_execute(stores, plan)
+    broker = LiveBroker(stores[1], client=object(), enable_live=True,
+                        kill_switch_engaged=False)
+    service.broker = broker
+
+    with pytest.raises(RuntimeError, match="P0_A readiness"):
+        service.execute(
+            plan_id=plan.plan_id, confirmation_id=approved.confirmation_id,
+        )
+    assert dbm.list_intents(stores[1], plan.plan_id) == []
+    assert dbm.get_confirmation(stores[1], approved.confirmation_id)["status"] == "APPROVED"
+
+
+def test_execute_returns_unknown_outcome_and_never_retries(stores):
+    plan = _plan("p_execute_unknown", "LIVE")
+    service, approved = _prepare_execute(stores, plan)
+    dbm.mark_system_readiness(stores[1], "P0_A", "test-evidence")
+    dbm.create_live_canary(
+        stores[1], "default", ["AAPL.US"], "BUY", 1_000, 1,
+        "2099-12-31T23:59:59Z", canary_id="execute-canary",
+    )
+
+    class FailingClient:
+        calls = 0
+
+        def order(self, **kwargs):
+            self.calls += 1
+            raise RuntimeError("network outcome unknown")
+
+    client = FailingClient()
+    service.broker = LiveBroker(
+        stores[1], client=client, enable_live=True, kill_switch_engaged=False,
+    )
+    result = service.execute(
+        plan_id=plan.plan_id, confirmation_id=approved.confirmation_id,
+    )
+    assert result["status"] == "UNKNOWN_OUTCOME"
+    assert result["retry"] is False
+    assert client.calls == 1
+    assert dbm.list_intents(stores[1], plan.plan_id)[0]["status"] == "UNKNOWN"
+
+    second = service.execute(
+        plan_id=plan.plan_id, confirmation_id=approved.confirmation_id,
+    )
+    assert second["status"] == "UNKNOWN_OUTCOME"
+    assert second["retry"] is False
+    assert client.calls == 1

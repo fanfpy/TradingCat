@@ -27,6 +27,7 @@ from execution.models import (
 from shared import db as dbm
 from execution.persistence import insert_plan
 from execution.state import set_intent_status
+from execution.broker_live import UnknownOutcomeError
 
 
 # ────────────────────────────────────────────────────────────────
@@ -245,6 +246,10 @@ class OrderManager:
         """
         if plan.execution_mode not in ("DRY_RUN", "PAPER", "LIVE"):
             raise RuntimeError(f"非法 execution_mode={plan.execution_mode}")
+        existing = dbm.list_intents(self.conn, plan.plan_id)
+        if any(row["status"] == "UNKNOWN" for row in existing):
+            raise UnknownOutcomeError(
+                f"plan {plan.plan_id} has UNKNOWN outcome; manual reconciliation required")
         if (plan.execution_mode == "LIVE"
                 and confirmation.approval_channel != APPROVAL_PROOF_CHANNEL):
             raise RuntimeError(
@@ -300,12 +305,19 @@ class OrderManager:
                 # confirmation 已 APPROVED 且已 CONSUMED，杜绝绕过确认的直通提交）
                 try:
                     ack = self.broker.submit_order(dict(stored), confirmation=confirmation, plan=plan)
-                except Exception:
+                except UnknownOutcomeError:
                     set_intent_status(self.conn, stored["intent_id"], "UNKNOWN")
                     dbm.close_live_canaries(
                         self.conn, "broker_submit_unknown_or_credential_error",
                         plan.account_id)
                     raise
+                except Exception as exc:
+                    set_intent_status(self.conn, stored["intent_id"], "UNKNOWN")
+                    dbm.close_live_canaries(
+                        self.conn, "broker_submit_unknown_or_credential_error",
+                        plan.account_id)
+                    raise UnknownOutcomeError(
+                        f"broker submit outcome unknown (fail closed): {exc}") from exc
                 set_intent_status(self.conn, stored["intent_id"], "SUBMITTED",
                                   ack.broker_order_id)
                 # SDK 回调线程只负责入队；ack 落库后由当前线程安全消费。

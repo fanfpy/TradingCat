@@ -69,6 +69,12 @@ class LiveBrokerError(RuntimeError):
     """券商提交失败（fail closed：不产生 ack，由上层决定如何处理）。"""
 
 
+class UnknownOutcomeError(LiveBrokerError):
+    """提交进入券商边界后无法证明结果；绝不允许自动重试。"""
+
+    status = "UNKNOWN_OUTCOME"
+
+
 # ────────────────────────────────────────────────────────────────
 # LiveBroker
 # ────────────────────────────────────────────────────────────────

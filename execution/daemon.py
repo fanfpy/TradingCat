@@ -15,6 +15,12 @@ from execution.service import ExecutionService
 from shared import db as dbm
 
 
+# UnixStreamServer is unavailable on Windows, but keeping the dispatch class
+# importable there lets the boundary tests run without pretending to support a
+# Windows Unix-socket daemon.
+_StreamServer = getattr(socketserver, "UnixStreamServer", socketserver.TCPServer)
+
+
 class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
         try:
@@ -27,7 +33,7 @@ class _Handler(socketserver.StreamRequestHandler):
         self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-class ExecutionDaemon(socketserver.UnixStreamServer):
+class ExecutionDaemon(_StreamServer):
     allow_reuse_address = True
 
     def __init__(self, socket_path: str, service: ExecutionService):
@@ -48,8 +54,22 @@ class ExecutionDaemon(socketserver.UnixStreamServer):
                 return self.service.approve(request["confirmation_id"], proof).to_dict()
             return self.service.reject(
                 request["confirmation_id"], proof, request.get("reason", "")).to_dict()
+        if operation == "execute":
+            allowed = {"operation", "plan_id", "confirmation_id"}
+            unexpected = sorted(set(request) - allowed)
+            if unexpected:
+                raise ValueError(
+                    "execute 只接受 plan_id/confirmation_id；禁止订单字段覆盖: "
+                    + ",".join(unexpected))
+            if "plan_id" not in request or "confirmation_id" not in request:
+                raise ValueError("execute 必须提供 plan_id 和 confirmation_id")
+            return self.service.execute(
+                plan_id=request["plan_id"],
+                confirmation_id=request["confirmation_id"],
+            )
         if operation == "health":
-            return {"status": "P0_A_DRY_RUN_ONLY", "live_submit_rpc": False}
+            return {"status": "P0_A_DRY_RUN_ONLY", "execute_rpc": True,
+                    "live_submit_rpc": False}
         raise ValueError(f"unsupported operation: {operation}")
 
 
