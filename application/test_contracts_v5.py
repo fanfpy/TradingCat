@@ -48,11 +48,46 @@ def test_request_approval_only_creates_pending_in_execution_store():
     dbm.insert_plan(core, plan.plan_id, plan.account_id, plan.execution_mode,
                     plan.expires_at, plan.plan_hash,
                     [order.to_dict() for order in plan.orders])
-    result = app.request_approval(plan.plan_id)
+    result = app.request_approval(plan.plan_id, plan.plan_hash)
     assert result["ok"] and result["data"]["approval_status"] == "PENDING"
     assert core.execute("SELECT count(*) FROM trading_confirmation").fetchone()[0] == 0
     assert execution.execute(
         "SELECT status FROM trading_confirmation").fetchone()[0] == "PENDING"
+
+
+def test_request_approval_requires_plan_hash_and_is_idempotent_with_bounded_expiry():
+    core = dbm.get_conn(":memory:")
+    execution = dbm.get_conn(":memory:")
+    app = TradingCatApplication(core, execution)
+    from execution.models import ExecutionPlan, PlanOrder
+    plan = ExecutionPlan(
+        "p_idempotent", "default", "LIVE", "2030-01-01T00:00:00Z",
+        (PlanOrder("1", "AAPL.US", "BUY", 1, reference_price=100),))
+    dbm.insert_plan(core, plan.plan_id, plan.account_id, plan.execution_mode,
+                    plan.expires_at, plan.plan_hash,
+                    [order.to_dict() for order in plan.orders])
+    missing_hash = app.request_approval(plan.plan_id)
+    assert missing_hash["error"]["code"] == "PLAN_HASH_REQUIRED"
+    first = app.request_approval(plan.plan_id, plan.plan_hash, "request-1")
+    second = app.request_approval(plan.plan_id, plan.plan_hash, "request-1")
+    assert first["data"]["confirmation"] == second["data"]["confirmation"]
+    assert first["data"]["confirmation"]["expires_at"] == plan.expires_at
+
+
+def test_request_approval_rejects_wrong_plan_hash():
+    core = dbm.get_conn(":memory:")
+    execution = dbm.get_conn(":memory:")
+    app = TradingCatApplication(core, execution)
+    from execution.models import ExecutionPlan, PlanOrder
+    plan = ExecutionPlan(
+        "p_hash", "default", "LIVE", "2030-01-01T00:00:00Z",
+        (PlanOrder("1", "AAPL.US", "BUY", 1),))
+    dbm.insert_plan(core, plan.plan_id, plan.account_id, plan.execution_mode,
+                    plan.expires_at, plan.plan_hash,
+                    [order.to_dict() for order in plan.orders])
+    result = app.request_approval(plan.plan_id, "wrong")
+    assert result["ok"] is False
+    assert "plan_hash" in result["error"]["message"]
 
 
 def test_investor_policy_version_is_frozen_into_plan_hash_lineage():

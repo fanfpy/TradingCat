@@ -208,7 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_universe_source ON trading_universe(source);
 CREATE TABLE IF NOT EXISTS trading_execution_plan (
     plan_id        TEXT PRIMARY KEY,
     account_id     TEXT NOT NULL,
-    execution_mode TEXT NOT NULL,       -- DRY_RUN|LIVE
+    execution_mode TEXT NOT NULL,       -- DRY_RUN|PAPER|LIVE
     expires_at     TEXT NOT NULL,
     plan_hash      TEXT NOT NULL,
     orders_json    TEXT NOT NULL,       -- PlanOrder[] 完整快照（不可变）
@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS trading_confirmation (
     approval_nonce  TEXT UNIQUE,        -- 防 replay
     approved_at     TEXT,
     expires_at      TEXT NOT NULL,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_confirmation_plan ON trading_confirmation(plan_id);
 
@@ -613,6 +614,12 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE trading_order_intent ADD COLUMN strategy_version_id INTEGER")
     if not _has_column(conn, "trading_order_intent", "confirmation_id"):
         conn.execute("ALTER TABLE trading_order_intent ADD COLUMN confirmation_id TEXT")
+    if not _has_column(conn, "trading_confirmation", "idempotency_key"):
+        conn.execute("ALTER TABLE trading_confirmation ADD COLUMN idempotency_key TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_confirmation_idempotency "
+        "ON trading_confirmation(idempotency_key) WHERE idempotency_key IS NOT NULL"
+    )
     if not _has_column(conn, "data_manifest", "adjustment_mode"):
         conn.execute("ALTER TABLE data_manifest ADD COLUMN adjustment_mode TEXT NOT NULL DEFAULT 'UNKNOWN'")
     if not _has_column(conn, "data_manifest", "corporate_actions_status"):
@@ -2060,7 +2067,7 @@ INTENT_STATUSES = ("PENDING", "SUBMITTING", "SUBMITTED", "REJECTED", "FILLED", "
 
 def insert_plan(conn: sqlite3.Connection, plan_id: str, account_id: str, execution_mode: str,
                 expires_at: str, plan_hash: str, orders: List[Dict], status: str = "PENDING") -> None:
-    if execution_mode not in ("DRY_RUN", "LIVE"):
+    if execution_mode not in ("DRY_RUN", "PAPER", "LIVE"):
         raise ValueError(f"非法 execution_mode: {execution_mode}")
     if status not in PLAN_STATUSES:
         raise ValueError(f"非法 plan status: {status}")
@@ -2123,7 +2130,7 @@ def set_plan_status(conn: sqlite3.Connection, plan_id: str, status: str) -> None
 def insert_confirmation(conn: sqlite3.Connection, confirmation_id: str, plan_id: str, plan_hash: str,
                         expires_at: str, approved_by: Optional[str] = None,
                         approval_channel: Optional[str] = None, approval_nonce: Optional[str] = None,
-                        status: str = "PENDING") -> None:
+                        status: str = "PENDING", idempotency_key: Optional[str] = None) -> None:
     if status not in CONFIRMATION_STATUSES:
         raise ValueError(f"非法 confirmation status: {status}")
     existing = get_confirmation(conn, confirmation_id)
@@ -2132,9 +2139,9 @@ def insert_confirmation(conn: sqlite3.Connection, confirmation_id: str, plan_id:
         conn.execute(
             "INSERT INTO trading_confirmation "
             "(confirmation_id, plan_id, plan_hash, status, approved_by, approval_channel, approval_nonce, "
-            " approved_at, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " approved_at, expires_at, created_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (confirmation_id, plan_id, plan_hash, status, approved_by, approval_channel,
-             approval_nonce, approved_at, expires_at, _now()),
+             approval_nonce, approved_at, expires_at, _now(), idempotency_key),
         )
     else:
         if (existing["plan_id"] != plan_id or existing["plan_hash"] != plan_hash
@@ -2158,6 +2165,14 @@ def insert_confirmation(conn: sqlite3.Connection, confirmation_id: str, plan_id:
 def get_confirmation(conn: sqlite3.Connection, confirmation_id: str) -> Optional[sqlite3.Row]:
     return conn.execute("SELECT * FROM trading_confirmation WHERE confirmation_id = ?",
                         (confirmation_id,)).fetchone()
+
+
+def get_confirmation_by_idempotency_key(
+        conn: sqlite3.Connection, idempotency_key: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM trading_confirmation WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
 
 
 def approval_nonce_exists(conn: sqlite3.Connection, nonce: str) -> bool:

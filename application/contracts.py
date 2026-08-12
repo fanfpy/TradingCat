@@ -269,25 +269,45 @@ class TradingCatApplication:
                       account_state=None) -> Dict:
         from production.decision import run_decision, target_to_execution_plan
 
-        if mode not in ("DRY_RUN", "PAPER"):
+        if mode not in ("DRY_RUN", "PAPER", "LIVE"):
             return _envelope(
                 "ProposeTrade",
-                error={"code": "LIVE_DISABLED",
-                       "message": "application JSON 契约只允许 DRY_RUN 或 PAPER；LIVE 必须由独立 executiond 处理",
+                error={"code": "INVALID_EXECUTION_MODE",
+                       "message": f"非法 execution mode: {mode}；默认 PAPER，LIVE 必须显式指定",
                        "retryable": False},
             )
 
         target = run_decision(self.core, equity, account_state, as_of)
         plan = target_to_execution_plan(
             self.core, target, equity, account_id, mode, account_state)
+        if plan is None and mode == "LIVE":
+            # LIVE proposal must still produce an immutable, auditable plan even
+            # when risk/position sizing yields no orders.  It is never executable
+            # by this layer; approval remains a separate explicit step.
+            from datetime import datetime, timedelta, timezone
+            from execution.models import ExecutionPlan
+            expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            plan = ExecutionPlan(
+                plan_id=f"plan_{uuid.uuid4().hex[:12]}", account_id=account_id,
+                execution_mode="LIVE", expires_at=expires_at, orders=(),
+            )
+            dbm.insert_plan(
+                self.core, plan.plan_id, plan.account_id, plan.execution_mode,
+                plan.expires_at, plan.plan_hash, [],
+            )
         return _envelope(
             "ProposeTrade", data={
+                "status": ("PENDING_APPROVAL" if plan is not None and mode == "LIVE"
+                           else "PROPOSED"),
                 "target_portfolio": {
                     "passed": target.passed, "failures": target.failures,
                     "final_fracs": target.final_fracs, "details": target.details,
                 },
                 "execution_plan": plan.to_dict() if plan else None,
                 "requires_explicit_human_approval": plan is not None,
+                "approval_status": ("PENDING_APPROVAL" if plan is not None and mode == "LIVE"
+                                    else None),
             },
             warnings=[] if target.passed else ["组合风控未通过；新买入目标已归零"],
             lineage={"plan_id": plan.plan_id if plan else None},
@@ -346,7 +366,8 @@ class TradingCatApplication:
                   "lifecycle": dict(lifecycle) if lifecycle is not None else None,
                   "plans": plans,
                   "safety": {"default_mode": "PAPER", "paper_is_local": True,
-                             "live_enabled": False, "live_submission": "DISABLED"}},
+                             "live_enabled": False,
+                             "live_submission": "PENDING_APPROVAL_ONLY"}},
             warnings=(["账户尚未 SYNCED；状态仅供诊断"]
                       if account is None or account["sync_status"] != "SYNCED" else []),
         )
@@ -368,14 +389,30 @@ class TradingCatApplication:
             warnings=["报告为本地只读摘要；没有远程推送或交易副作用"],
         )
 
-    def request_approval(self, plan_id: str) -> Dict:
+    def request_approval(self, plan_id: str, plan_hash: Optional[str] = None,
+                         idempotency_key: Optional[str] = None) -> Dict:
+        if not plan_hash:
+            return _envelope(
+                "RequestApproval",
+                error={"code": "PLAN_HASH_REQUIRED",
+                       "message": "request-approval 必须同时提供 plan_id 与 plan_hash",
+                       "retryable": False},
+            )
         if self.execution is None:
             return _envelope(
                 "RequestApproval", error={"code": "EXECUTIOND_UNAVAILABLE",
                                           "message": "未连接独立 executiond"})
         from execution.service import ExecutionService
         service = ExecutionService(self.core, self.execution)
-        confirmation = service.request_confirmation(plan_id)
+        try:
+            confirmation = service.request_confirmation(
+                plan_id, plan_hash=plan_hash, idempotency_key=idempotency_key)
+        except ValueError as exc:
+            return _envelope(
+                "RequestApproval",
+                error={"code": "INVALID_APPROVAL_REQUEST", "message": str(exc),
+                       "retryable": False},
+            )
         return _envelope(
             "RequestApproval", data={
                 "confirmation": confirmation.to_dict(),

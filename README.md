@@ -4,6 +4,12 @@
 
 # TradingCat
 
+## 第一阶段执行计划契约
+
+应用层默认 `PAPER`；`LIVE` 必须显式指定。`propose(mode="LIVE")` 只会生成并持久化不可变 `ExecutionPlan`，返回 `PENDING_APPROVAL`，不会批准、执行、读取真实凭证或提交订单。
+
+调用 `request-approval` 时必须同时提供 `plan_id` 与 `plan_hash`，可提供 `idempotency_key`。同一幂等键绑定同一计划时会返回同一个 confirmation；不同计划复用该键会被拒绝。confirmation 的 `expires_at` 不会晚于对应 plan 的 `expires_at`。
+
 [English](README_EN.md)
 
 TradingCat 是一个面向个人投资者的、Agent 无关的量化研究与交易决策系统。它把股票

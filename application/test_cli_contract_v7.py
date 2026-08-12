@@ -39,16 +39,17 @@ def test_short_status_and_report_operations_use_the_same_envelope(monkeypatch):
     assert conn.execute("SELECT count(*) FROM security_master").fetchone()[0] == 0
 
 
-def test_propose_live_is_rejected_before_decision_or_plan_creation():
+def test_propose_live_creates_pending_approval_plan():
     app = TradingCatApplication(dbm.get_core_conn(":memory:"))
     result = app.propose_trade(100_000, mode="LIVE")
-    assert result["ok"] is False
-    assert result["error"]["code"] == "LIVE_DISABLED"
+    assert result["ok"] is True
+    assert result["data"]["status"] == "PENDING_APPROVAL"
+    assert result["data"]["execution_plan"]["execution_mode"] == "LIVE"
 
 
-def test_status_exposes_paper_default_and_live_disabled():
+def test_status_exposes_paper_default_and_live_pending_only():
     result = TradingCatApplication(dbm.get_core_conn(":memory:")).status()
     assert result["data"]["safety"] == {
         "default_mode": "PAPER", "paper_is_local": True,
-        "live_enabled": False, "live_submission": "DISABLED",
+        "live_enabled": False, "live_submission": "PENDING_APPROVAL_ONLY",
     }

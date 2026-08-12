@@ -126,6 +126,7 @@ class Confirmation:
     approved_at: Optional[str] = None
     expires_at: Optional[str] = None
     created_at: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
     def is_expired(self, at: Optional[str] = None) -> bool:
         """到期瞬间即失效，与 ExecutionPlan 使用同一边界规则。"""

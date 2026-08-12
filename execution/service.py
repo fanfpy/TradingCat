@@ -7,11 +7,12 @@
 """
 
 import json
+import sqlite3
 import uuid
 from typing import Optional
 
 from execution.models import (
-    APPROVAL_PROOF_CHANNEL, Confirmation, ExecutionPlan, PlanOrder,
+    APPROVAL_PROOF_CHANNEL, Confirmation, ExecutionPlan, PlanOrder, parse_ts,
 )
 from execution.approval_wechat import IdentityProof, IdentityVerifier
 from shared import db as dbm
@@ -59,16 +60,44 @@ class ExecutionService:
         return plan
 
     def request_confirmation(self, plan_id: str, *,
+                             plan_hash: Optional[str] = None,
+                             idempotency_key: Optional[str] = None,
                              expires_at: Optional[str] = None,
                              confirmation_id: Optional[str] = None) -> Confirmation:
         """在 execution store 创建 PENDING Confirmation。"""
         plan = self.read_and_snapshot_plan(plan_id)
+        if plan_hash is not None and plan_hash != plan.plan_hash:
+            raise ValueError("plan_hash 与不可变计划不匹配")
+        if idempotency_key:
+            existing = dbm.get_confirmation_by_idempotency_key(
+                self.execution_conn, idempotency_key)
+            if existing is not None:
+                if (existing["plan_id"] != plan.plan_id
+                        or existing["plan_hash"] != plan.plan_hash):
+                    raise ValueError("idempotency_key 已绑定其他计划")
+                return Confirmation(**dict(existing))
         cid = confirmation_id or f"cfm_{uuid.uuid4().hex[:12]}"
-        exp = expires_at or "2099-12-31T23:59:59Z"
-        dbm.insert_confirmation(
-            self.execution_conn, cid, plan.plan_id, plan.plan_hash,
-            expires_at=exp, status="PENDING",
-        )
+        exp = expires_at or plan.expires_at
+        if parse_ts(exp) > parse_ts(plan.expires_at):
+            exp = plan.expires_at
+        try:
+            dbm.insert_confirmation(
+                self.execution_conn, cid, plan.plan_id, plan.plan_hash,
+                expires_at=exp, status="PENDING", idempotency_key=idempotency_key,
+            )
+        except sqlite3.IntegrityError:
+            # A concurrent retry may win the unique idempotency-key insert.
+            # Return that same durable confirmation after re-checking its binding.
+            if not idempotency_key:
+                raise
+            existing = dbm.get_confirmation_by_idempotency_key(
+                self.execution_conn, idempotency_key)
+            if existing is None:
+                raise
+            if (existing["plan_id"] != plan.plan_id
+                    or existing["plan_hash"] != plan.plan_hash):
+                raise ValueError("idempotency_key 已绑定其他计划")
+            return Confirmation(**dict(existing))
         row = dbm.get_confirmation(self.execution_conn, cid)
         assert row is not None
         return Confirmation(**dict(row))
