@@ -319,7 +319,7 @@ def test_daemon_approval_requires_and_binds_canonical_proof_claims(stores):
     assert dbm.get_confirmation(execution, cfm.confirmation_id)["status"] == "PENDING"
 
     tampered = dict(raw, plan_id="other-plan")
-    with pytest.raises(ValueError, match="canonical claim|签名无效"):
+    with pytest.raises(ValueError, match="canonical claim|confirmation 不匹配|签名无效"):
         daemon.dispatch({
             "operation": "approve", "confirmation_id": cfm.confirmation_id,
             "approval_proof": tampered,
