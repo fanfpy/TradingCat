@@ -164,9 +164,6 @@ class ExecutionService:
             raise ConfirmationNotFoundError(
                 f"execution confirmation 不存在: {confirmation_id}")
         confirmation = Confirmation(**dict(row))
-        if confirmation.is_expired():
-            raise ConfirmationExpiredError(
-                f"confirmation 已过期: {confirmation_id}")
         if confirmation.status != "PENDING":
             raise ConfirmationNotPendingError(
                 f"confirmation 状态 {confirmation.status} 不可批准（只允许 PENDING）")
@@ -178,6 +175,9 @@ class ExecutionService:
             raise PlanHashMismatchError("confirmation.plan_hash 与 execution plan 不匹配")
         if snapshot.is_expired():
             raise PlanExpiredError(f"plan 已过期: {snapshot.plan_id}")
+        if confirmation.is_expired():
+            raise ConfirmationExpiredError(
+                f"confirmation 已过期: {confirmation_id}")
 
         # Canonical proofs carry all claims.  Legacy callers may omit the
         # optional fields, but any supplied claim must still match the stored
