@@ -50,13 +50,19 @@ from shared import db as dbm
 class ReplayError(ValueError):
     """approval_nonce 已被使用（防重放拒绝）。"""
 
+    error_code = "APPROVAL_NONCE_REPLAY"
+
 
 class PlanHashMismatchError(ValueError):
     """expected_plan_hash 与 plan.plan_hash 不一致（展示值与执行计划强绑定失败）。"""
 
+    error_code = "PLAN_HASH_MISMATCH"
+
 
 class ApprovalIdentityError(ValueError):
     """远程用户身份签名无效、过期或未绑定 owner。"""
+
+    error_code = "APPROVAL_PROOF_INVALID"
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,13 @@ class IdentityProof:
     timestamp: int
     nonce: str
     signature: str
+    # These claims are optional for the legacy WeChat adapter wire shape.  The
+    # canonical approve JSON contract requires them and the verifier binds
+    # them to the request supplied by executiond.
+    action: Optional[str] = None
+    confirmation_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    plan_hash: Optional[str] = None
 
 
 class IdentityVerifier(Protocol):
@@ -109,6 +122,14 @@ class HMACIdentityVerifier:
 
     def verify(self, proof: IdentityProof, *, action: str, confirmation_id: str,
                plan_id: str, plan_hash: str) -> str:
+        for field, expected in (("action", action),
+                                ("confirmation_id", confirmation_id),
+                                ("plan_id", plan_id),
+                                ("plan_hash", plan_hash)):
+            actual = getattr(proof, field)
+            if actual is not None and actual != expected:
+                raise ApprovalIdentityError(
+                    f"ApprovalProof {field} 与请求不匹配")
         if abs(int(time.time()) - int(proof.timestamp)) > self.max_age_seconds:
             raise ApprovalIdentityError("审批身份签名已过期")
         owner = self.owner_map.get(proof.subject)

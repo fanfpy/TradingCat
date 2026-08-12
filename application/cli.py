@@ -25,6 +25,7 @@ OPERATIONS = {
     "propose-trade": ("propose_trade", "ProposeTrade"),
     "explain-decision": ("explain_decision", "ExplainDecision"),
     "request-approval": ("request_approval", "RequestApproval"),
+    "approve": ("approve", "Approve"),
 }
 
 
@@ -86,10 +87,13 @@ def _read_payload(path: str) -> Dict[str, Any]:
 
 def _invoke(operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     target, envelope_operation = OPERATIONS[operation]
+    if operation == "approve" and "approved_by" in payload:
+        raise ContractArgumentError(
+            "canonical approve 不接受 approved_by；必须提交受信 ApprovalProof")
     if operation == "paper":
         payload = {**payload, "mode": "PAPER"}
     core = dbm.get_core_conn()
-    execution = dbm.get_execution_conn() if operation == "request-approval" else None
+    execution = dbm.get_execution_conn() if operation in {"request-approval", "approve"} else None
     providers = []
     openalice = OpenAliceCommandProvider.from_env()
     if openalice is not None:
@@ -123,8 +127,10 @@ def main(argv=None) -> int:
                 result, exit_code = _error(
                     OPERATIONS[args.operation][1], "ARGUMENT_ERROR", str(exc)), 2
             except (TypeError, ValueError) as exc:
+                code = getattr(exc, "error_code", None)
                 result, exit_code = _error(
-                    OPERATIONS[args.operation][1], "INVALID_REQUEST", str(exc)), 2
+                    OPERATIONS[args.operation][1], code or "INVALID_REQUEST", str(exc)), \
+                    1 if code else 2
             except Exception as exc:
                 result, exit_code = _error(
                     OPERATIONS[args.operation][1], "INTERNAL_ERROR", str(exc),

@@ -23,6 +23,44 @@ from execution.persistence import insert_plan
 ApprovalProof = IdentityProof
 
 
+class ApprovalServiceError(ValueError):
+    """稳定地映射到 canonical approve JSON 的业务错误码。"""
+
+    error_code = "APPROVAL_REJECTED"
+
+
+class ConfirmationNotFoundError(ApprovalServiceError):
+    error_code = "CONFIRMATION_NOT_FOUND"
+
+
+class ConfirmationExpiredError(ApprovalServiceError):
+    error_code = "CONFIRMATION_EXPIRED"
+
+
+class ConfirmationNotPendingError(ApprovalServiceError):
+    error_code = "CONFIRMATION_NOT_PENDING"
+
+
+class PlanNotFoundError(ApprovalServiceError):
+    error_code = "PLAN_NOT_FOUND"
+
+
+class PlanExpiredError(ApprovalServiceError):
+    error_code = "PLAN_EXPIRED"
+
+
+class PlanHashMismatchError(ApprovalServiceError):
+    error_code = "PLAN_HASH_MISMATCH"
+
+
+class ApprovalProofClaimMismatchError(ApprovalServiceError):
+    error_code = "APPROVAL_PROOF_CLAIM_MISMATCH"
+
+
+class ApprovalNonceReplayError(ApprovalServiceError):
+    error_code = "APPROVAL_NONCE_REPLAY"
+
+
 class ExecutionService:
     """独立 executiond 的最小可信边界。"""
 
@@ -109,19 +147,54 @@ class ExecutionService:
         verifier 返回经过身份映射的 owner，调用方提供的 approved_by 不被信任。
         """
         if self.identity_verifier is None:
-            raise RuntimeError("executiond 未配置 ApprovalProof verifier")
+            error = ApprovalServiceError("executiond 未配置 ApprovalProof verifier")
+            error.error_code = "APPROVAL_VERIFIER_UNAVAILABLE"
+            raise error
         row = dbm.get_confirmation(self.execution_conn, confirmation_id)
         if row is None:
-            raise ValueError(f"execution confirmation 不存在: {confirmation_id}")
+            raise ConfirmationNotFoundError(
+                f"execution confirmation 不存在: {confirmation_id}")
+        confirmation = Confirmation(**dict(row))
+        if confirmation.is_expired():
+            raise ConfirmationExpiredError(
+                f"confirmation 已过期: {confirmation_id}")
+        if confirmation.status != "PENDING":
+            raise ConfirmationNotPendingError(
+                f"confirmation 状态 {confirmation.status} 不可批准（只允许 PENDING）")
+
+        snapshot = self.get_snapshot(row["plan_id"])
+        if snapshot is None:
+            raise PlanNotFoundError(f"execution plan 不存在: {row['plan_id']}")
+        if snapshot.plan_hash != row["plan_hash"]:
+            raise PlanHashMismatchError("confirmation.plan_hash 与 execution plan 不匹配")
+        if snapshot.is_expired():
+            raise PlanExpiredError(f"plan 已过期: {snapshot.plan_id}")
+
+        # Canonical proofs carry all claims.  Legacy callers may omit the
+        # optional fields, but any supplied claim must still match the stored
+        # immutable confirmation before the verifier is called.
+        for field, expected in (("action", "approve"),
+                                ("confirmation_id", confirmation_id),
+                                ("plan_id", row["plan_id"]),
+                                ("plan_hash", row["plan_hash"])):
+            actual = getattr(proof, field, None)
+            if actual is not None and actual != expected:
+                raise ApprovalProofClaimMismatchError(
+                    f"ApprovalProof {field} 与 confirmation 不匹配")
         owner = self.identity_verifier.verify(
             proof, action="approve", confirmation_id=confirmation_id,
             plan_id=row["plan_id"], plan_hash=row["plan_hash"],
         )
-        approved = dbm.approve_confirmation(
-            self.execution_conn, confirmation_id, owner, APPROVAL_PROOF_CHANNEL,
-            proof.nonce, expected_plan_id=row["plan_id"],
-            expected_plan_hash=row["plan_hash"],
-        )
+        try:
+            approved = dbm.approve_confirmation(
+                self.execution_conn, confirmation_id, owner, APPROVAL_PROOF_CHANNEL,
+                proof.nonce, expected_plan_id=row["plan_id"],
+                expected_plan_hash=row["plan_hash"],
+            )
+        except ValueError as exc:
+            if "approval_nonce 已使用" in str(exc):
+                raise ApprovalNonceReplayError(str(exc)) from exc
+            raise
         return Confirmation(**dict(approved))
 
     def reject(self, confirmation_id: str, proof: ApprovalProof,

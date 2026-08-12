@@ -421,6 +421,53 @@ class TradingCatApplication:
             }, lineage={"plan_id": plan_id,
                         "confirmation_id": confirmation.confirmation_id})
 
+    def approve(self, confirmation_id: str, approval_proof: Dict) -> Dict:
+        """Canonical approve: only a verified ApprovalProof can approve."""
+        if self.execution is None:
+            return _envelope(
+                "Approve", error={"code": "EXECUTIOND_UNAVAILABLE",
+                                  "message": "未连接独立 executiond",
+                                  "retryable": False})
+        if not isinstance(approval_proof, dict):
+            raise TypeError("approval_proof 必须是 object")
+        required = (
+            "subject", "action", "confirmation_id", "plan_id", "plan_hash",
+            "nonce", "timestamp", "signature",
+        )
+        missing = [key for key in required if key not in approval_proof]
+        if missing:
+            raise ValueError(
+                "canonical ApprovalProof 缺少字段: " + ", ".join(missing))
+        if approval_proof["action"] != "approve":
+            raise ValueError("canonical ApprovalProof action 必须为 approve")
+        if approval_proof["confirmation_id"] != confirmation_id:
+            raise ValueError("ApprovalProof confirmation_id 与请求不匹配")
+        try:
+            timestamp = int(approval_proof["timestamp"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ApprovalProof timestamp 必须是整数") from exc
+        from execution.approval_wechat import HMACIdentityVerifier, IdentityProof
+        from execution.service import ExecutionService
+        proof = IdentityProof(
+            subject=approval_proof["subject"], timestamp=timestamp,
+            nonce=approval_proof["nonce"], signature=approval_proof["signature"],
+            action=approval_proof["action"],
+            confirmation_id=approval_proof["confirmation_id"],
+            plan_id=approval_proof["plan_id"],
+            plan_hash=approval_proof["plan_hash"],
+        )
+        service = ExecutionService(
+            self.core, self.execution,
+            identity_verifier=HMACIdentityVerifier.from_env(),
+        )
+        confirmation = service.approve(confirmation_id, proof)
+        return _envelope(
+            "Approve", data={
+                "confirmation": confirmation.to_dict(),
+                "approval_status": confirmation.status,
+            }, lineage={"plan_id": confirmation.plan_id,
+                        "confirmation_id": confirmation.confirmation_id})
+
     def explain_decision(self, plan_id: str) -> Dict:
         from production.decision import load_execution_plan
 
