@@ -39,7 +39,11 @@ def _proof(verifier, cfm, nonce="proof-nonce", action="approve", timestamp=None)
         plan_id=cfm.plan_id, plan_hash=cfm.plan_hash,
     )
     signature = hmac.new(SECRET.encode(), payload, hashlib.sha256).hexdigest()
-    return IdentityProof(unsigned.subject, unsigned.timestamp, nonce, signature)
+    return IdentityProof(
+        unsigned.subject, unsigned.timestamp, nonce, signature,
+        action=action, confirmation_id=cfm.confirmation_id,
+        plan_id=cfm.plan_id, plan_hash=cfm.plan_hash,
+    )
 
 
 @pytest.fixture
@@ -257,3 +261,73 @@ def test_execute_returns_unknown_outcome_and_never_retries(stores):
     assert second["status"] == "UNKNOWN_OUTCOME"
     assert second["retry"] is False
     assert client.calls == 1
+
+
+def test_daemon_forwards_request_claims_and_idempotency_key(stores):
+    core, execution, verifier = stores
+    plan = _plan("p_daemon_request", "LIVE")
+    _persist_core(core, plan)
+    service = ExecutionService(core, execution, identity_verifier=verifier)
+    daemon = object.__new__(ExecutionDaemon)
+    daemon.service = service
+
+    first = daemon.dispatch({
+        "operation": "request_confirmation", "plan_id": plan.plan_id,
+        "plan_hash": plan.plan_hash, "idempotency_key": "request-1",
+    })
+    second = daemon.dispatch({
+        "operation": "request_confirmation", "plan_id": plan.plan_id,
+        "plan_hash": plan.plan_hash, "idempotency_key": "request-1",
+    })
+    assert first["confirmation_id"] == second["confirmation_id"]
+    assert first["plan_hash"] == plan.plan_hash
+
+    with pytest.raises(ValueError, match="plan_hash"):
+        daemon.dispatch({
+            "operation": "request_confirmation", "plan_id": plan.plan_id,
+            "plan_hash": "tampered", "idempotency_key": "request-2",
+        })
+
+
+def test_daemon_approval_requires_and_binds_canonical_proof_claims(stores):
+    core, execution, verifier = stores
+    plan = _plan("p_daemon_approve", "LIVE")
+    _persist_core(core, plan)
+    service = ExecutionService(core, execution, identity_verifier=verifier)
+    daemon = object.__new__(ExecutionDaemon)
+    daemon.service = service
+    pending = daemon.dispatch({
+        "operation": "request_confirmation", "plan_id": plan.plan_id,
+        "plan_hash": plan.plan_hash, "idempotency_key": "approve-1",
+    })
+    cfm = Confirmation(**pending)
+    proof = _proof(verifier, cfm)
+    raw = {
+        "subject": proof.subject, "timestamp": proof.timestamp,
+        "nonce": proof.nonce, "signature": proof.signature,
+        "action": proof.action, "confirmation_id": proof.confirmation_id,
+        "plan_id": proof.plan_id, "plan_hash": proof.plan_hash,
+    }
+
+    missing = dict(raw)
+    del missing["plan_hash"]
+    with pytest.raises(ValueError, match="canonical claims"):
+        daemon.dispatch({
+            "operation": "approve", "confirmation_id": cfm.confirmation_id,
+            "approval_proof": missing,
+        })
+    assert dbm.get_confirmation(execution, cfm.confirmation_id)["status"] == "PENDING"
+
+    tampered = dict(raw, plan_id="other-plan")
+    with pytest.raises(ValueError, match="canonical claim|签名无效"):
+        daemon.dispatch({
+            "operation": "approve", "confirmation_id": cfm.confirmation_id,
+            "approval_proof": tampered,
+        })
+    assert dbm.get_confirmation(execution, cfm.confirmation_id)["status"] == "PENDING"
+
+    approved = daemon.dispatch({
+        "operation": "approve", "confirmation_id": cfm.confirmation_id,
+        "approval_proof": raw,
+    })
+    assert approved["status"] == "APPROVED"

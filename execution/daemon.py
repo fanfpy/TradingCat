@@ -44,12 +44,26 @@ class ExecutionDaemon(_StreamServer):
         operation = request.get("operation")
         if operation == "request_confirmation":
             return self.service.request_confirmation(
-                request["plan_id"], confirmation_id=request.get("confirmation_id")).to_dict()
+                request["plan_id"],
+                confirmation_id=request.get("confirmation_id"),
+                plan_hash=request.get("plan_hash"),
+                idempotency_key=request.get("idempotency_key"),
+            ).to_dict()
         if operation in ("approve", "reject"):
             raw = request["approval_proof"]
+            required_claims = ("action", "confirmation_id", "plan_id", "plan_hash")
+            missing = [name for name in required_claims if name not in raw]
+            if missing:
+                raise ValueError(
+                    "approval_proof 缺少 canonical claims: " + ",".join(missing))
+            if raw["confirmation_id"] != request["confirmation_id"]:
+                raise ValueError("approval_proof.confirmation_id 与请求不匹配")
             proof = IdentityProof(
                 subject=raw["subject"], timestamp=int(raw["timestamp"]),
-                nonce=raw["nonce"], signature=raw["signature"])
+                nonce=raw["nonce"], signature=raw["signature"],
+                action=raw["action"], confirmation_id=raw["confirmation_id"],
+                plan_id=raw["plan_id"], plan_hash=raw["plan_hash"],
+            )
             if operation == "approve":
                 return self.service.approve(request["confirmation_id"], proof).to_dict()
             return self.service.reject(
