@@ -26,6 +26,7 @@ OPERATIONS = {
     "explain-decision": ("explain_decision", "ExplainDecision"),
     "request-approval": ("request_approval", "RequestApproval"),
     "approve": ("approve", "Approve"),
+    "execute": ("execute", "Execute"),
 }
 
 
@@ -87,6 +88,18 @@ def _read_payload(path: str) -> Dict[str, Any]:
 
 def _invoke(operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     target, envelope_operation = OPERATIONS[operation]
+    if operation == "execute":
+        allowed = {"plan_id", "confirmation_id"}
+        unexpected = sorted(set(payload) - allowed)
+        missing = sorted(allowed - set(payload))
+        if unexpected or missing:
+            details = []
+            if missing:
+                details.append("缺少 " + ", ".join(missing))
+            if unexpected:
+                details.append("不允许 " + ", ".join(unexpected))
+            raise ContractArgumentError(
+                "canonical execute 输入只允许 plan_id、confirmation_id；" + "；".join(details))
     if operation == "approve" and "approved_by" in payload:
         raise ContractArgumentError(
             "canonical approve 不接受 approved_by；必须提交受信 ApprovalProof")
@@ -132,9 +145,15 @@ def main(argv=None) -> int:
                     OPERATIONS[args.operation][1], code or "INVALID_REQUEST", str(exc)), \
                     1 if code else 2
             except Exception as exc:
-                result, exit_code = _error(
-                    OPERATIONS[args.operation][1], "INTERNAL_ERROR", str(exc),
-                    retryable=bool(getattr(exc, "retryable", False))), 1
+                code = getattr(exc, "error_code", None)
+                if code:
+                    result, exit_code = _error(
+                        OPERATIONS[args.operation][1], code, str(exc),
+                        retryable=bool(getattr(exc, "retryable", False))), 1
+                else:
+                    result, exit_code = _error(
+                        OPERATIONS[args.operation][1], "INTERNAL_ERROR", str(exc),
+                        retryable=bool(getattr(exc, "retryable", False))), 1
     except ContractArgumentError as exc:
         result, exit_code = _error(operation or "unknown", "ARGUMENT_ERROR", str(exc)), 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

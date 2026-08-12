@@ -1,6 +1,8 @@
 """Agent 无关的 v5 application contracts；所有适配器只调用这里。"""
 
 import json
+import os
+import socket
 import uuid
 from datetime import datetime
 from dataclasses import asdict
@@ -15,6 +17,98 @@ from shared.security import SecurityResolver, UNKNOWN_METADATA
 
 
 SCHEMA_VERSION = "tradingcat.v1"
+
+
+class ExecutiondRPCError(RuntimeError):
+    """A typed failure at the application-to-executiond boundary."""
+
+    error_code = "EXECUTIOND_REJECTED"
+    retryable = False
+
+
+class ExecutiondUnavailableError(ExecutiondRPCError):
+    error_code = "EXECUTIOND_UNAVAILABLE"
+    retryable = True
+
+
+class ExecutiondProtocolError(ExecutiondRPCError):
+    error_code = "EXECUTIOND_PROTOCOL_ERROR"
+
+
+class ExecutiondClient:
+    """Minimal client for the executiond line-delimited JSON RPC contract.
+
+    This client deliberately has no broker dependency.  In particular it does
+    not inspect plans or synthesize order fields: executiond is the authority
+    for both operations.
+    """
+
+    DEFAULT_SOCKET_PATH = "/run/tradingcat/executiond.sock"
+    MAX_RESPONSE_BYTES = 1024 * 1024
+
+    def __init__(self, socket_path: Optional[str] = None, *, timeout: float = 5.0,
+                 socket_factory=None):
+        self.socket_path = socket_path or os.environ.get(
+            "TRADINGCAT_EXECUTIOND_SOCKET", self.DEFAULT_SOCKET_PATH)
+        self.timeout = timeout
+        self.socket_factory = socket_factory or socket.socket
+
+    def execute(self, *, plan_id: str, confirmation_id: str) -> Dict:
+        if not isinstance(plan_id, str) or not plan_id:
+            raise ValueError("execute.plan_id 必须是非空字符串")
+        if not isinstance(confirmation_id, str) or not confirmation_id:
+            raise ValueError("execute.confirmation_id 必须是非空字符串")
+        request = {"operation": "execute", "plan_id": plan_id,
+                   "confirmation_id": confirmation_id}
+        try:
+            # Linux production uses the Unix socket.  Keep the client
+            # importable/testable on Windows, where the bundled Python may not
+            # expose AF_UNIX and the daemon test seam supplies its own socket.
+            family = getattr(socket, "AF_UNIX", getattr(socket, "AF_INET", 2))
+            conn = self.socket_factory(family, socket.SOCK_STREAM)
+            try:
+                conn.settimeout(self.timeout)
+                conn.connect(self.socket_path)
+                conn.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
+                raw = self._read_line(conn)
+            finally:
+                conn.close()
+        except OSError as exc:
+            raise ExecutiondUnavailableError(
+                f"无法连接 executiond ({self.socket_path}): {exc}") from exc
+        try:
+            response = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ExecutiondProtocolError("executiond 返回了无效 JSON") from exc
+        if not isinstance(response, dict) or not isinstance(response.get("ok"), bool):
+            raise ExecutiondProtocolError("executiond 响应缺少 boolean ok")
+        if response["ok"]:
+            if not isinstance(response.get("data"), dict):
+                raise ExecutiondProtocolError("executiond 成功响应缺少 object data")
+            # Keep SUBMITTED, duplicate rejections represented by executiond,
+            # and UNKNOWN_OUTCOME exactly as executiond returned them.  Never retry.
+            return response["data"]
+        remote = response.get("error")
+        if not isinstance(remote, dict) or not isinstance(remote.get("message"), str):
+            raise ExecutiondProtocolError("executiond 失败响应缺少 error.message")
+        error_type = remote.get("type")
+        suffix = f" ({error_type})" if isinstance(error_type, str) else ""
+        raise ExecutiondRPCError(remote["message"] + suffix)
+
+    def _read_line(self, conn) -> bytes:
+        chunks = []
+        size = 0
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                raise ExecutiondProtocolError("executiond 在响应前关闭连接")
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > self.MAX_RESPONSE_BYTES:
+                raise ExecutiondProtocolError("executiond 响应超过大小限制")
+            joined = b"".join(chunks)
+            if b"\n" in joined:
+                return joined.split(b"\n", 1)[0]
 
 
 def _envelope(operation: str, *, data=None, error=None, warnings=None,
@@ -467,6 +561,20 @@ class TradingCatApplication:
                 "approval_status": confirmation.status,
             }, lineage={"plan_id": confirmation.plan_id,
                         "confirmation_id": confirmation.confirmation_id})
+
+    def execute(self, plan_id: str, confirmation_id: str) -> Dict:
+        """Submit identifier-only execute RPC to the isolated executiond.
+
+        This method never imports a broker or ``ExecutionService``.  It does
+        not retry: an executiond ``UNKNOWN_OUTCOME`` is returned as-is for
+        manual reconciliation, and a duplicate is left to executiond.
+        """
+        result = ExecutiondClient().execute(
+            plan_id=plan_id, confirmation_id=confirmation_id)
+        return _envelope(
+            "Execute", data=result,
+            lineage={"plan_id": plan_id, "confirmation_id": confirmation_id},
+        )
 
     def explain_decision(self, plan_id: str) -> Dict:
         from production.decision import load_execution_plan

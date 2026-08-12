@@ -174,7 +174,23 @@ printf '%s' '{"plan_id":"plan_xxx"}' |
 该接口只创建 `PENDING` Confirmation。Agent 不得制造 ApprovalProof、修改数据库状态或
 把 PENDING 描述为已批准。executiond 不可用时返回 `EXECUTIOND_UNAVAILABLE`。
 
-### 3.6 explain-decision
+### 3.6 execute
+
+```json
+{"plan_id":"plan_xxx","confirmation_id":"confirmation_xxx"}
+```
+
+```bash
+printf '%s' '{"plan_id":"plan_xxx","confirmation_id":"confirmation_xxx"}' |
+  ./.venv/bin/python -m application.cli execute
+```
+
+`execute` 的输入只允许这两个不可变标识符；application 只会通过本机
+`executiond` socket 调用，不会直接访问 broker。`EXECUTIOND_UNAVAILABLE` 表示可重试的
+服务边界故障。`UNKNOWN_OUTCOME` 和重复执行的拒绝/状态均由 executiond 原样返回；不得
+自动重试或推断成交结果。
+
+### 3.7 explain-decision
 
 ```json
 {"plan_id":"plan_xxx"}

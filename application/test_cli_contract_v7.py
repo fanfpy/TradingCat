@@ -6,7 +6,9 @@ import time
 import pytest
 
 from application import cli
-from application.contracts import TradingCatApplication
+from application.contracts import (
+    ExecutiondClient, ExecutiondRPCError, TradingCatApplication,
+)
 from shared import db as dbm
 from execution.approval_wechat import HMACIdentityVerifier
 from execution.models import ExecutionPlan, PlanOrder
@@ -160,3 +162,99 @@ def test_canonical_approve_rejects_string_approval_and_expired_confirmation(monk
             "approval_proof": _canonical_proof(verifier, pending_plan),
         })
     assert getattr(exc_info.value, "error_code", None) == "PLAN_EXPIRED"
+
+
+class _FakeExecutiondSocket:
+    def __init__(self, response):
+        self.response = response
+        self.sent = b""
+        self.connected_to = None
+        self.closed = False
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def connect(self, path):
+        self.connected_to = path
+
+    def sendall(self, data):
+        self.sent += data
+
+    def recv(self, size):
+        response, self.response = self.response, b""
+        return response
+
+    def close(self):
+        self.closed = True
+
+
+def test_execute_client_sends_identifiers_only_and_preserves_unknown_outcome():
+    wire = json.dumps({"ok": True, "data": {
+        "status": "UNKNOWN_OUTCOME", "plan_id": "plan-1",
+        "confirmation_id": "confirmation-1", "retry": False,
+        "message": "manual reconciliation required",
+    }}).encode() + b"\n"
+    fake_socket = _FakeExecutiondSocket(wire)
+    client = ExecutiondClient("/tmp/executiond.sock", socket_factory=lambda *_: fake_socket)
+
+    result = client.execute(plan_id="plan-1", confirmation_id="confirmation-1")
+
+    assert result == {
+        "status": "UNKNOWN_OUTCOME", "plan_id": "plan-1",
+        "confirmation_id": "confirmation-1", "retry": False,
+        "message": "manual reconciliation required",
+    }
+    assert json.loads(fake_socket.sent) == {
+        "operation": "execute", "plan_id": "plan-1",
+        "confirmation_id": "confirmation-1",
+    }
+    assert fake_socket.connected_to == "/tmp/executiond.sock"
+    assert fake_socket.closed
+
+
+def test_execute_client_returns_executiond_rejection_without_broker_fallback():
+    fake_socket = _FakeExecutiondSocket(json.dumps({"ok": False, "error": {
+        "type": "RuntimeError", "message": "confirmation 已消费，禁止自动重试",
+    }}).encode() + b"\n")
+    client = ExecutiondClient(socket_factory=lambda *_: fake_socket)
+
+    with pytest.raises(ExecutiondRPCError, match="禁止自动重试"):
+        client.execute(plan_id="plan-1", confirmation_id="confirmation-1")
+
+
+def test_cli_execute_accepts_only_stable_identifier_input(monkeypatch):
+    with pytest.raises(cli.ContractArgumentError, match="只允许"):
+        cli._invoke("execute", {
+            "plan_id": "plan-1", "confirmation_id": "confirmation-1",
+            "quantity": 99,
+        })
+
+    class StubClient:
+        def execute(self, *, plan_id, confirmation_id):
+            assert (plan_id, confirmation_id) == ("plan-1", "confirmation-1")
+            return {"status": "UNKNOWN_OUTCOME", "retry": False}
+
+    monkeypatch.setattr("application.contracts.ExecutiondClient", lambda: StubClient())
+    result = cli._invoke("execute", {
+        "plan_id": "plan-1", "confirmation_id": "confirmation-1",
+    })
+    assert result["ok"] is True
+    assert result["data"] == {"status": "UNKNOWN_OUTCOME", "retry": False}
+
+
+def test_cli_execute_maps_executiond_unavailable_to_retryable_exit_one(monkeypatch, capsys):
+    class OfflineClient:
+        def execute(self, **kwargs):
+            from application.contracts import ExecutiondUnavailableError
+            raise ExecutiondUnavailableError("executiond offline")
+
+    monkeypatch.setattr("application.contracts.ExecutiondClient", lambda: OfflineClient())
+    monkeypatch.setattr(cli.sys, "stdin", type("Input", (), {
+        "read": lambda self: '{"plan_id":"plan-1","confirmation_id":"confirmation-1"}',
+    })())
+    assert cli.main(["execute"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"] == {
+        "code": "EXECUTIOND_UNAVAILABLE", "message": "executiond offline",
+        "retryable": True,
+    }
