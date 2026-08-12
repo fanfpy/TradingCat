@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from shared import db as dbm
 from shared.sdk_diagnostics import diagnose_longbridge
 from shared.quant_provider import LongbridgeQuantProvider
+from scripts.deployment_readiness import run_deployment_readiness
 
 
 def _run(command):
@@ -32,7 +33,17 @@ def main(argv=None) -> int:
     parser.add_argument("--record-p0a", action="store_true",
                         help="在 execution store 记录 P0_A=PASS")
     parser.add_argument("--confirm-deployment-isolation", action="store_true",
-                        help="确认 executiond 已使用独立 OS 用户/DB 权限部署")
+                        help="已废弃：P0-A 只接受现场 deployment readiness=PASS")
+    parser.add_argument("--deployment-readiness", action="store_true",
+                        help="运行 Linux/systemd P0-A 部署隔离现场验收（不连接券商）")
+    parser.add_argument("--core-user", default="tradingcat-core")
+    parser.add_argument("--execution-user", default="tradingcat-exec")
+    parser.add_argument("--execution-read-group", default="tradingcat-core-read")
+    parser.add_argument("--socket-client-group", default="tradingcat-exec-client")
+    parser.add_argument("--core-env-file", default="/etc/tradingcat/core.env")
+    parser.add_argument("--execution-env-file", default="/etc/tradingcat/executiond.env")
+    parser.add_argument("--executiond-service", default="tradingcat-executiond.service")
+    parser.add_argument("--executiond-socket", default="/run/tradingcat/executiond.sock")
     args = parser.parse_args(argv)
 
     personal_loop = (
@@ -54,6 +65,19 @@ def main(argv=None) -> int:
         "live_cli_disabled_without_approval_proof": True,
         "p0_b_real_order": "NOT_RUN_REQUIRES_EXPLICIT_USER_APPROVAL",
     }
+    deployment = None
+    if args.deployment_readiness:
+        deployment = run_deployment_readiness(
+            core_user=args.core_user, execution_user=args.execution_user,
+            execution_read_group=args.execution_read_group,
+            socket_client_group=args.socket_client_group,
+            core_db=os.environ.get("TRADING_CORE_DB", "/var/lib/tradingcat/core/core.db"),
+            execution_db=os.environ.get("TRADING_EXECUTION_DB", "/var/lib/tradingcat/execution/execution.db"),
+            socket_path=args.executiond_socket, core_env_file=args.core_env_file,
+            execution_env_file=args.execution_env_file, service=args.executiond_service,
+            template_path=ROOT / "deploy" / "systemd" / "tradingcat-executiond.service",
+        )
+        checks["deployment_isolation"] = deployment
     automated_passed = (
         checks["pytest"]["passed"] and checks["e2e_dry_run"]["passed"]
         and (personal_loop.get("skipped") or personal_loop.get("passed"))
@@ -68,6 +92,7 @@ def main(argv=None) -> int:
         "sdk_version": checks["sdk"]["version"],
         "sdk_capabilities": checks["sdk"]["capabilities"],
         "stores_configured_separately": checks["stores_configured_separately"],
+        "deployment_isolation": deployment["status"] if deployment else "NOT_RUN",
         "live_cli_disabled_without_approval_proof": True,
         "p0_b_real_order": "NOT_RUN_REQUIRES_EXPLICIT_USER_APPROVAL",
     }
@@ -77,16 +102,16 @@ def main(argv=None) -> int:
     if args.record_p0a:
         if not automated_passed:
             raise RuntimeError("自动验收未全部通过，不能记录 P0_A")
-        if not args.confirm_deployment_isolation:
+        if not deployment or deployment["status"] != "PASS":
             raise RuntimeError(
-                "记录 P0_A 前必须确认 executiond 独立 OS 用户及 execution store 权限")
+                "记录 P0_A 前必须运行 --deployment-readiness 且所有 Linux/systemd 现场检查 PASS")
         execution = dbm.get_execution_conn()
         dbm.mark_system_readiness(execution, "P0_A", evidence)
         recorded = True
 
     report = {
         "architecture": "v5", "automated_acceptance": "PASS" if automated_passed else "FAIL",
-        "deployment_isolation_confirmed": args.confirm_deployment_isolation,
+        "deployment_isolation": deployment,
         "p0_a_recorded": recorded, "evidence_hash": evidence, "checks": checks,
         "live_status": "DRY_RUN_ONLY",
     }

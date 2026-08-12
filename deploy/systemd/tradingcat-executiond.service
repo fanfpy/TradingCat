@@ -7,13 +7,14 @@ Wants=network-online.target
 Type=simple
 User=tradingcat-exec
 Group=tradingcat-exec
+SupplementaryGroups=tradingcat-core-read tradingcat-exec-client
 WorkingDirectory=${TS_ROOT}
 Environment=PYTHONPATH=${TS_ROOT}
 Environment=TRADING_CORE_DB=/var/lib/tradingcat/core/core.db
 Environment=TRADING_EXECUTION_DB=/var/lib/tradingcat/execution/execution.db
 Environment=TRADINGCAT_REQUIRE_SEPARATE_CREDENTIALS=1
 EnvironmentFile=/etc/tradingcat/executiond.env
-ExecStart=/usr/bin/python3 -m execution.daemon --socket /run/tradingcat/executiond.sock
+ExecStart=/usr/bin/python3 -m execution.daemon --socket /run/tradingcat/executiond.sock --socket-group tradingcat-exec-client
 RuntimeDirectory=tradingcat
 RuntimeDirectoryMode=0750
 NoNewPrivileges=true

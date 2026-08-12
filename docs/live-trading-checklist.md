@@ -11,14 +11,15 @@
 - [ ] 行情凭证与交易凭证已分离，交易凭证只注入 executiond。
 - [ ] `tradingcat-executiond.service` 的 systemd 沙箱参数已在目标机器验证。
 - [ ] Core 不能调用真实 Broker RPC；executiond 不接受任意订单字段。
-- [ ] 运行以下命令并记录 P0-A：
+- [ ] 在 Linux/systemd 目标机器运行以下命令；所有 deployment isolation 检查必须为 `PASS`：
 
 ```bash
 ./.venv/bin/python scripts/acceptance_v5.py \
-  --record-p0a --confirm-deployment-isolation
+  --deployment-readiness --record-p0a
 ```
 
-该命令不创建 Live Canary，也不提交订单。
+该命令只检查服务/权限/凭证变量名/socket health，不创建 Live Canary、不连接券商、也不提交订单。
+非 Linux/systemd 环境必须记录为 `NOT_RUN`/`FAIL`，不得手工确认或伪造 `PASS`。
 
 ## 2. 自动验收
 

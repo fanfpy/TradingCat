@@ -70,6 +70,28 @@ P0-A 验收要求：
 
 参考模板：`deploy/systemd/tradingcat-executiond.service`。
 
+### P0-A Linux/systemd 现场部署
+
+以下命令只读取本机 systemd、文件所有者/权限、环境文件中的**变量名**和 executiond 的
+`health` socket RPC；不会连接 Longbridge、创建 Canary 或提交订单。生产主机需先创建
+`tradingcat-core`、`tradingcat-exec`、`tradingcat-core-read` 和 `tradingcat-exec-client`，其中
+Core 用户只加入 socket client 组，executiond 用户加入 core read 与 socket client 组。
+
+```bash
+sudo install -d -o tradingcat-core -g tradingcat-core-read -m 0750 /var/lib/tradingcat/core
+sudo install -d -o tradingcat-exec -g tradingcat-exec -m 0700 /var/lib/tradingcat/execution
+sudo install -o tradingcat-core -g tradingcat-core-read -m 0640 /dev/null /var/lib/tradingcat/core/core.db
+sudo install -o tradingcat-exec -g tradingcat-exec -m 0600 /dev/null /var/lib/tradingcat/execution/execution.db
+sudo install -o root -g tradingcat-exec -m 0640 /dev/null /etc/tradingcat/executiond.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now tradingcat-executiond.service
+
+./.venv/bin/python scripts/deployment_readiness.py
+```
+
+现场验收仅在 Linux 且 systemd 运行、服务 active 时返回 `PASS`。在 Windows、macOS、容器中
+没有 systemd，或无法读取现场信息时返回 `NOT_RUN`/`FAIL`，不得据此记录 P0-A。
+
 ## 4. 调度
 
 `deploy/` 提供两种独立于 Agent 的调度方式：
@@ -97,11 +119,11 @@ cd /opt/tradingcat
 ./.venv/bin/python scripts/acceptance_v5.py
 ```
 
-未确认 OS 用户/数据库隔离时，不要使用 `--record-p0a`。完成真实部署检查后才可运行：
+未通过 Linux/systemd 现场验收时，不要使用 `--record-p0a`。完成真实部署检查后才可运行：
 
 ```bash
 ./.venv/bin/python scripts/acceptance_v5.py \
-  --record-p0a --confirm-deployment-isolation
+  --deployment-readiness --record-p0a
 ```
 
 这只记录 P0-A readiness，不会创建 Canary 或提交订单。

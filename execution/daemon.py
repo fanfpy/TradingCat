@@ -10,6 +10,11 @@ import os
 import socketserver
 from pathlib import Path
 
+try:  # Unix socket ownership configuration is only meaningful on POSIX.
+    import grp
+except ImportError:  # pragma: no cover - Windows keeps dispatch importable for tests
+    grp = None
+
 from execution.approval_wechat import HMACIdentityVerifier, IdentityProof
 from execution.service import ExecutionService
 from shared import db as dbm
@@ -116,6 +121,8 @@ class ExecutionDaemon(_StreamServer):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="tradingcat-executiond")
     parser.add_argument("--socket", default="/run/tradingcat/executiond.sock")
+    parser.add_argument("--socket-group", default=None,
+                        help="POSIX group allowed to connect to the Unix socket")
     parser.add_argument("--core-db", default=dbm.CORE_DB_PATH)
     parser.add_argument("--execution-db", default=dbm.EXECUTION_DB_PATH)
     args = parser.parse_args(argv)
@@ -129,6 +136,16 @@ def main(argv=None) -> int:
     verifier = HMACIdentityVerifier.from_env()
     service = ExecutionService(core, execution, identity_verifier=verifier)
     server = ExecutionDaemon(str(socket_path), service)
+    if args.socket_group:
+        if grp is None:
+            server.server_close()
+            raise RuntimeError("--socket-group requires a POSIX host")
+        try:
+            socket_gid = grp.getgrnam(args.socket_group).gr_gid
+        except KeyError as exc:
+            server.server_close()
+            raise RuntimeError(f"socket group does not exist: {args.socket_group}") from exc
+        os.chown(socket_path, -1, socket_gid)
     os.chmod(socket_path, 0o660)
     try:
         server.serve_forever()
