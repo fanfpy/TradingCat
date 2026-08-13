@@ -59,7 +59,7 @@ def test_propose_live_without_orders_is_not_approvable_or_persisted():
     assert result["data"]["approval_status"] is None
     assert result["data"]["details"]["orders_count"] == 0
     assert app.core.execute(
-        "SELECT count(*) FROM execution_plan WHERE execution_mode='LIVE'"
+        "SELECT count(*) FROM trading_execution_plan WHERE execution_mode='LIVE'"
     ).fetchone()[0] == 0
 
 
