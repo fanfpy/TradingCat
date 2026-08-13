@@ -114,9 +114,11 @@ printf '{"query":"AAPL","reason":"等待趋势信号"}' |
    identifiers from the response rather than reconstructing them.
 
 For an explicitly requested LIVE workflow, `ProposeTrade` with `mode=LIVE` creates an immutable
-plan and returns `PENDING_APPROVAL`; it does not approve or submit anything. Then call
-`RequestApproval` with the returned `plan_id` and `plan_hash`. A trusted human approval adapter
-must produce the signed `ApprovalProof`; the Agent must not create, copy, or replay that proof.
+plan and returns `PENDING_APPROVAL` only when the account is `SYNCED` and the plan has non-empty
+orders; it does not approve or submit anything. An empty result returns `NO_ACTION` or `BLOCKED`,
+with no persisted plan and no approval state. Then call `RequestApproval` only with the returned
+`plan_id` and `plan_hash`. A trusted human approval adapter must produce the signed
+`ApprovalProof`; the Agent must not create, copy, or replay that proof.
 Only after trusted approval is recorded may the Agent call `execute` with exactly `plan_id` and
 `confirmation_id`. `execute` never accepts symbol, side, quantity, price, or mode overrides.
 

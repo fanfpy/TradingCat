@@ -6,7 +6,7 @@
 
 ## 第一阶段执行计划契约
 
-应用层默认 `PAPER`；`LIVE` 必须显式指定。`propose(mode="LIVE")` 只会生成并持久化不可变 `ExecutionPlan`，返回 `PENDING_APPROVAL`，不会批准、执行、读取真实凭证或提交订单。
+应用层默认 `PAPER`；`LIVE` 必须显式指定。`propose(mode="LIVE")` 仅在账户为 `SYNCED` 且存在非空订单时生成并持久化不可变 `ExecutionPlan`，返回 `PENDING_APPROVAL`；无可执行订单时返回 `NO_ACTION` 或 `BLOCKED`，不会持久化空计划、批准、执行、读取真实凭证或提交订单。
 
 调用 `request-approval` 时必须同时提供 `plan_id` 与 `plan_hash`，可提供 `idempotency_key`。同一幂等键绑定同一计划时会返回同一个 confirmation；不同计划复用该键会被拒绝。confirmation 的 `expires_at` 不会晚于对应 plan 的 `expires_at`。
 

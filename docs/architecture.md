@@ -125,7 +125,7 @@ sequenceDiagram
     U->>A: 给出买入比例
     A->>C: ProposeTrade
     C->>P: 收缩 Kelly + 组合风险
-    P-->>C: 目标权重与不可变 ExecutionPlan
+    P-->>C: 目标权重；仅非空订单创建不可变 ExecutionPlan
     C-->>U: 展示计划和 plan_hash，等待明确审批
 
     U->>E: 对指定 plan_hash 提交 ApprovalProof
@@ -197,7 +197,7 @@ TargetPortfolio 再检查总名义敞口、止损风险、行业/币种集中度
 
 ```text
 Signal → PositionIntent → TargetPortfolio → PortfolioRisk
-→ immutable ExecutionPlan(plan_hash)
+→ non-empty orders → immutable ExecutionPlan(plan_hash)
 → PENDING Confirmation
 → user ApprovalProof
 → PreTradeRisk(PASS/REJECT)
@@ -216,6 +216,8 @@ Signal → PositionIntent → TargetPortfolio → PortfolioRisk
 6. OrderIntent 与 Confirmation 消费必须在同一事务内；
 7. 账户非 SYNCED、订单 UNKNOWN 或对账 MISMATCH 时 fail closed；
 8. 普通 LIVE 永久默认关闭，只能在人工创建且受限的 Live Canary 中测试。
+9. 没有非空可执行订单时不得创建或持久化 LIVE ExecutionPlan；应用层返回 `NO_ACTION`
+   或 `BLOCKED`，且不进入审批状态。
 
 ## 8. 数据与进程边界
 

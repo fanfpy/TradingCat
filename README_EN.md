@@ -94,7 +94,8 @@ interpretation, and mandatory stop conditions.
 The LIVE Agent sequence is:
 
 ```bash
-# Create a pending LIVE plan; this does not place an order.
+# Create a pending LIVE plan only when the account is SYNCED and orders are non-empty;
+# an empty result is NO_ACTION or BLOCKED and is not persisted.
 printf '%s' '{"equity":100000,"account_id":"default","mode":"LIVE"}' |
   ./.venv/bin/python -m application.cli propose-trade
 

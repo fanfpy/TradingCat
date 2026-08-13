@@ -68,8 +68,9 @@ Agent 必须展示 `warnings`，不能把缺失数据解释为零，也不能把
 
 稳定短入口是 `analyze`、`backtest`、`propose`、`paper`、`status`、`report`、
 `request-approval`、`approve` 和 `execute`。`propose` 默认使用本地 PAPER 语义，`paper`
-强制 PAPER；显式传入 `mode=LIVE` 时，`propose` 只生成 `PENDING_APPROVAL` 的不可变计划，
-不会批准或下单。
+强制 PAPER；显式传入 `mode=LIVE` 时，只有账户为 `SYNCED` 且存在非空订单才生成
+`PENDING_APPROVAL` 的不可变计划，不会批准或下单。无订单时返回 `NO_ACTION` 或 `BLOCKED`，
+`execution_plan` 为 `null`，不会持久化空 LIVE 计划。
 
 ## 3. 分析一只股票
 
