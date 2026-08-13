@@ -1356,6 +1356,8 @@ def authorize_live_canary(conn: sqlite3.Connection, *, account_id: str,
     if reference_price is None or reference_price <= 0 or quantity <= 0:
         raise RuntimeError("LIVE_CANARY 无法计算名义金额")
     notional = float(quantity) * float(reference_price)
+    authorization_error = None
+    selected = None
     with immediate_transaction(conn):
         existing = conn.execute(
             "SELECT c.* FROM live_canary_usage u JOIN live_canary c USING(canary_id) "
@@ -1363,57 +1365,137 @@ def authorize_live_canary(conn: sqlite3.Connection, *, account_id: str,
         ).fetchone()
         if existing is not None:
             return existing
+        now = _now()
+        _close_live_canaries_locked(
+            conn, "canary_expired", account_id=account_id,
+            where_sql="expires_at <= ?", where_params=(now,),
+        )
         rows = conn.execute(
             "SELECT * FROM live_canary WHERE account_id=? AND side=? AND status='ACTIVE' "
-            "AND expires_at>=? ORDER BY created_at", (account_id, side, _now()),
+            "AND expires_at>=? ORDER BY created_at", (account_id, side, now),
         ).fetchall()
-        selected = None
         for row in rows:
             if symbol not in json.loads(row["symbols_json"]):
                 continue
+            if (row["used_orders"] >= row["max_orders"]
+                    or row["used_notional"] >= row["max_notional"] - 1e-9):
+                if (row["used_orders"] >= row["max_orders"]
+                        and row["used_notional"] >= row["max_notional"] - 1e-9):
+                    reason = "canary_limits_reached"
+                elif row["used_orders"] >= row["max_orders"]:
+                    reason = "canary_order_limit_reached"
+                else:
+                    reason = "canary_notional_limit_reached"
+                _close_live_canaries_locked(
+                    conn, reason, canary_ids=(row["canary_id"],),
+                )
+                continue
             if row["used_orders"] + 1 > row["max_orders"]:
+                _close_live_canaries_locked(
+                    conn, "canary_order_limit_reached",
+                    canary_ids=(row["canary_id"],),
+                )
                 continue
             if row["used_notional"] + notional > row["max_notional"] + 1e-9:
+                _close_live_canaries_locked(
+                    conn, "canary_notional_limit_reached",
+                    canary_ids=(row["canary_id"],),
+                )
                 continue
             selected = row
             break
         if selected is None:
-            raise RuntimeError("无匹配或额度充足的 ACTIVE LIVE_CANARY")
-        conn.execute(
-            "INSERT INTO live_canary_usage(canary_id,client_request_id,plan_id,symbol,"
-            "side,notional,created_at) VALUES(?,?,?,?,?,?,?)",
-            (selected["canary_id"], client_request_id, plan_id, symbol, side,
-             notional, _now()),
-        )
-        conn.execute(
-            "UPDATE live_canary SET used_orders=used_orders+1, "
-            "used_notional=used_notional+? WHERE canary_id=?",
-            (notional, selected["canary_id"]),
-        )
-        audit(conn, "LIVE_CANARY_AUTHORIZED", "plan", plan_id,
-              {"canary_id": selected["canary_id"], "client_request_id": client_request_id,
-               "notional": notional}, commit=False)
+            authorization_error = "无匹配或额度充足的 ACTIVE LIVE_CANARY"
+        if selected is not None:
+            conn.execute(
+                "INSERT INTO live_canary_usage(canary_id,client_request_id,plan_id,symbol,"
+                "side,notional,created_at) VALUES(?,?,?,?,?,?,?)",
+                (selected["canary_id"], client_request_id, plan_id, symbol, side,
+                 notional, _now()),
+            )
+            conn.execute(
+                "UPDATE live_canary SET used_orders=used_orders+1, "
+                "used_notional=used_notional+? WHERE canary_id=?",
+                (notional, selected["canary_id"]),
+            )
+            updated = conn.execute(
+                "SELECT * FROM live_canary WHERE canary_id=?",
+                (selected["canary_id"],),
+            ).fetchone()
+            orders_exhausted = updated["used_orders"] >= updated["max_orders"]
+            notional_exhausted = (
+                updated["used_notional"] >= updated["max_notional"] - 1e-9
+            )
+            if orders_exhausted or notional_exhausted:
+                if orders_exhausted and notional_exhausted:
+                    reason = "canary_limits_reached"
+                elif orders_exhausted:
+                    reason = "canary_order_limit_reached"
+                else:
+                    reason = "canary_notional_limit_reached"
+                _close_live_canaries_locked(
+                    conn, reason, canary_ids=(selected["canary_id"],),
+                )
+            audit(conn, "LIVE_CANARY_AUTHORIZED", "plan", plan_id,
+                  {"canary_id": selected["canary_id"], "client_request_id": client_request_id,
+                   "notional": notional}, commit=False)
+    if authorization_error is not None:
+        raise RuntimeError(authorization_error)
     return conn.execute(
         "SELECT * FROM live_canary WHERE canary_id=?", (selected["canary_id"],)
     ).fetchone()
 
 
+def _close_live_canaries_locked(
+        conn: sqlite3.Connection, reason: str,
+        account_id: Optional[str] = None,
+        canary_ids: Optional[tuple] = None,
+        where_sql: str = "", where_params: tuple = ()) -> int:
+    """Close active Canaries and append the audit in the caller's transaction."""
+    clauses = ["status='ACTIVE'"]
+    params = []
+    if account_id is not None:
+        clauses.append("account_id=?")
+        params.append(account_id)
+    if canary_ids is not None:
+        if not canary_ids:
+            return 0
+        clauses.append("canary_id IN (" + ",".join("?" for _ in canary_ids) + ")")
+        params.extend(canary_ids)
+    if where_sql:
+        clauses.append(where_sql)
+        params.extend(where_params)
+    rows = conn.execute(
+        "SELECT canary_id FROM live_canary WHERE " + " AND ".join(clauses),
+        params,
+    ).fetchall()
+    if not rows:
+        return 0
+    conn.execute(
+        "UPDATE live_canary SET status='CLOSED',close_reason=? WHERE "
+        + " AND ".join(clauses), [reason] + params,
+    )
+    audit(conn, "LIVE_CANARY_CLOSED", "account", account_id or "*",
+          {"reason": reason, "count": len(rows),
+           "canary_ids": [row["canary_id"] for row in rows]}, commit=False)
+    return len(rows)
+
+
 def close_live_canaries(conn: sqlite3.Connection, reason: str,
                         account_id: Optional[str] = None) -> int:
-    """UNKNOWN/MISMATCH/credential error 时立即关闭 Canary。"""
-    if account_id:
-        changed = conn.execute(
-            "UPDATE live_canary SET status='CLOSED',close_reason=? "
-            "WHERE status='ACTIVE' AND account_id=?", (reason, account_id)).rowcount
-    else:
-        changed = conn.execute(
-            "UPDATE live_canary SET status='CLOSED',close_reason=? WHERE status='ACTIVE'",
-            (reason,)).rowcount
-    conn.commit()
-    if changed:
-        audit(conn, "LIVE_CANARY_CLOSED", "account", account_id or "*",
-              {"reason": reason, "count": changed})
-    return changed
+    """原子关闭 ACTIVE Canary 并审计；重复关闭无副作用。"""
+    with immediate_transaction(conn):
+        return _close_live_canaries_locked(conn, reason, account_id=account_id)
+
+
+def close_expired_live_canaries(conn: sqlite3.Connection,
+                                account_id: Optional[str] = None) -> int:
+    """原子关闭已过期的 ACTIVE Canary。"""
+    with immediate_transaction(conn):
+        return _close_live_canaries_locked(
+            conn, "canary_expired", account_id=account_id,
+            where_sql="expires_at <= ?", where_params=(_now(),),
+        )
 
 
 # ────────────────────────────────────────────────────────────────

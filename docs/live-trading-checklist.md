@@ -82,6 +82,12 @@
 - 订单超过 Canary 金额、次数或有效期；
 - 用户撤回授权。
 
+实现约束：上述关闭必须在执行库的短事务中以 `status='ACTIVE'` 条件原子完成，并写入
+`close_reason` 与 `LIVE_CANARY_CLOSED` audit；重复关闭返回无变化，不得恢复或继续授权。
+当前实现使用 `account_state_<状态>`、`order_intent_unknown`、`canary_expired`、
+`canary_notional_limit_reached`、`canary_order_limit_reached`、`canary_limits_reached`
+和 `reconciliation_mismatch` 等明确原因。
+
 ## 7. 代码审计
 
 ```bash

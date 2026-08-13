@@ -248,6 +248,8 @@ class Reconciliation:
         ok = not mismatches
         if not ok:
             dbm.set_account_sync_status(self.core_conn, account_id, "MISMATCH")
+            dbm.close_live_canaries(
+                self.execution_conn, "reconciliation_mismatch", account_id)
         dbm.audit(self.execution_conn, "RECONCILE", entity_type="plan", entity_id=plan_id,
                   payload={"ok": ok, "mismatches": mismatches})
         return {"ok": ok, "mismatches": mismatches}
@@ -255,6 +257,7 @@ class Reconciliation:
     def _reconcile_paper_plan(self, plan_id: str, intents) -> Dict:
         """PAPER 对账只检查 execution store，绝不查询或连接券商。"""
         mismatches: List[str] = []
+        plan = dbm.get_plan(self.execution_conn, plan_id)
         for intent in intents:
             if intent["status"] == "UNKNOWN":
                 mismatches.append(
@@ -264,6 +267,9 @@ class Reconciliation:
                 mismatches.append(
                     f"{intent['client_request_id']} PAPER 缺本地 paper_order_id")
                 set_intent_status(self.execution_conn, intent["intent_id"], "UNKNOWN")
+        if mismatches and plan is not None:
+            dbm.close_live_canaries(
+                self.execution_conn, "reconciliation_mismatch", plan["account_id"])
         ok = not mismatches
         dbm.audit(self.execution_conn, "RECONCILE", entity_type="plan", entity_id=plan_id,
                   payload={"ok": ok, "mismatches": mismatches, "mode": "PAPER"})

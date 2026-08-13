@@ -231,6 +231,10 @@ class OrderManager:
                 # Without a broker id we cannot prove whether a submission
                 # happened, so never retry; reconciliation must resolve it.
                 set_intent_status(self.conn, row["intent_id"], "UNKNOWN")
+                plan = dbm.get_plan(self.conn, plan_id)
+                if plan is not None and plan["execution_mode"] == "LIVE":
+                    dbm.close_live_canaries(
+                        self.conn, "order_intent_unknown", plan["account_id"])
         existing = dbm.list_intents(self.conn, plan_id)
         if existing:
             return [dict(r) for r in existing]
@@ -246,8 +250,22 @@ class OrderManager:
         """
         if plan.execution_mode not in ("DRY_RUN", "PAPER", "LIVE"):
             raise RuntimeError(f"非法 execution_mode={plan.execution_mode}")
+        if plan.execution_mode == "LIVE":
+            dbm.close_expired_live_canaries(self.conn, plan.account_id)
+            if (account_state is None
+                    or account_state.sync_status != "SYNCED"):
+                dbm.close_live_canaries(
+                    self.conn,
+                    "account_state_" + (
+                        account_state.sync_status.lower()
+                        if account_state is not None else "unknown"),
+                    plan.account_id,
+                )
         existing = dbm.list_intents(self.conn, plan.plan_id)
         if any(row["status"] == "UNKNOWN" for row in existing):
+            if plan.execution_mode == "LIVE":
+                dbm.close_live_canaries(
+                    self.conn, "order_intent_unknown", plan.account_id)
             raise UnknownOutcomeError(
                 f"plan {plan.plan_id} has UNKNOWN outcome; manual reconciliation required")
         if (plan.execution_mode == "LIVE"
@@ -278,10 +296,23 @@ class OrderManager:
             dbm.audit(self.conn, "PRETRADE", entity_type="plan", entity_id=plan.plan_id,
                       payload={"decision": risk.decision, "reasons": risk.reasons})
             if not risk.passed:
-                if any("UNKNOWN" in reason or "MISMATCH" in reason
-                       for reason in risk.reasons):
-                    dbm.close_live_canaries(
-                        self.conn, "pretrade_unknown_or_mismatch", plan.account_id)
+                if plan.execution_mode == "LIVE":
+                    if (account_state is None
+                            or account_state.sync_status != "SYNCED"):
+                        dbm.close_live_canaries(
+                            self.conn,
+                            "account_state_" + (
+                                account_state.sync_status.lower()
+                                if account_state is not None else "unknown"),
+                            plan.account_id,
+                        )
+                    if any("UNKNOWN" in reason for reason in risk.reasons):
+                        dbm.close_live_canaries(
+                            self.conn, "order_intent_unknown", plan.account_id)
+                    if any("MISMATCH" in reason for reason in risk.reasons):
+                        dbm.close_live_canaries(
+                            self.conn, "pretrade_unknown_or_mismatch",
+                            plan.account_id)
                 from production.notification import safe_notify
                 safe_notify(
                     self.conn, "pretrade.rejected", f"{plan.plan_id} 风控拒绝",

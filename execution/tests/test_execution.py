@@ -31,7 +31,8 @@ import pytest
 from shared import db as dbm
 from shared.account import AccountState
 from execution.models import (
-    ExecutionPlan, PlanOrder, Confirmation, MarketState, PreTradeRiskResult, now_utc,
+    APPROVAL_PROOF_CHANNEL, ExecutionPlan, PlanOrder, Confirmation, MarketState,
+    PreTradeRiskResult, now_utc,
 )
 from execution.order_manager import ConfirmationService, ApprovalAdapter, OrderManager
 from execution.pretrade_risk import evaluate as pretrade_evaluate
@@ -273,6 +274,59 @@ def test_7_account_not_synced_rejected(conn, approved_plan):
     assert res.decision == "PASS"
 
 
+def test_live_stale_account_closes_canary_before_submit(conn):
+    plan = make_plan(plan_id="p_live_stale", mode="LIVE")
+    svc = ConfirmationService(conn)
+    cfm = svc.create(plan)
+    approved = Confirmation(
+        cfm.confirmation_id, plan.plan_id, plan.plan_hash, status="APPROVED",
+        approval_channel=APPROVAL_PROOF_CHANNEL,
+    )
+    dbm.set_confirmation_status(conn, cfm.confirmation_id, "APPROVED")
+    conn.execute(
+        "UPDATE trading_confirmation SET approval_channel=? WHERE confirmation_id=?",
+        (APPROVAL_PROOF_CHANNEL, cfm.confirmation_id),
+    )
+    conn.commit()
+    dbm.mark_system_readiness(conn, "P0_A", "suite-hash")
+    dbm.create_live_canary(conn, "default", ["NVDA.US"], "BUY", 1000, 1,
+                           future(1), "canary_stale")
+    class MockLiveBroker:
+        enable_live = True
+    with pytest.raises(RuntimeError, match="PreTradeRisk REJECT"):
+        OrderManager(conn, broker=MockLiveBroker()).submit(
+            plan, approved,
+            market_states={o.symbol: fresh_state(o.symbol) for o in plan.orders},
+            account_state=AccountState(account_id="default", sync_status="STALE",
+                                       buying_power=50000.0),
+        )
+    row = conn.execute("SELECT * FROM live_canary").fetchone()
+    assert row["status"] == "CLOSED"
+    assert row["close_reason"] == "account_state_stale"
+
+
+def test_live_unknown_existing_intent_closes_canary(conn):
+    plan = make_plan(plan_id="p_live_unknown", mode="LIVE")
+    dbm.insert_plan(conn, plan.plan_id, plan.account_id, plan.execution_mode,
+                    plan.expires_at, plan.plan_hash,
+                    [order.to_dict() for order in plan.orders])
+    dbm.insert_intent(conn, "cr_unknown", plan.plan_id, "1", "NVDA.US", "BUY", 1,
+                      status="UNKNOWN")
+    dbm.mark_system_readiness(conn, "P0_A", "suite-hash")
+    dbm.create_live_canary(conn, "default", ["NVDA.US"], "BUY", 1000, 1,
+                           future(1), "canary_unknown")
+    with pytest.raises(Exception, match="UNKNOWN"):
+        OrderManager(conn).submit(
+            plan, Confirmation("c", plan.plan_id, plan.plan_hash, status="APPROVED",
+                               approval_channel="approval-proof"),
+            market_states={o.symbol: fresh_state(o.symbol) for o in plan.orders},
+            account_state=ok_account(),
+        )
+    row = conn.execute("SELECT * FROM live_canary").fetchone()
+    assert row["status"] == "CLOSED"
+    assert row["close_reason"] == "order_intent_unknown"
+
+
 # ────────────────────────────────────────────────────────────────
 # 验收 8：quote stale 拒绝
 # ────────────────────────────────────────────────────────────────
@@ -348,9 +402,15 @@ def test_12_broker_local_mismatch_fail_closed(conn):
     core_conn = dbm.get_core_conn(":memory:")
     dbm.upsert_account(core_conn, "default", "SYNCED")
     rec = Reconciliation(core_conn, conn, None)  # 无 broker → 查不到
+    dbm.mark_system_readiness(conn, "P0_A", "suite-hash")
+    dbm.create_live_canary(conn, "default", ["NVDA.US"], "BUY", 1000, 1,
+                           future(1), "canary_mismatch")
     r = rec.reconcile_plan("p_mm")
     assert not r["ok"]
     assert dbm.get_account(core_conn, "default")["sync_status"] == "MISMATCH"
+    canary = conn.execute("SELECT * FROM live_canary WHERE canary_id='canary_mismatch'").fetchone()
+    assert canary["status"] == "CLOSED"
+    assert canary["close_reason"] == "reconciliation_mismatch"
     # MISMATCH → 新计划 PreTradeRisk REJECT
     plan = make_plan(plan_id="p_after_mm")
     svc = ConfirmationService(conn)
