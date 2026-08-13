@@ -46,3 +46,49 @@ def test_unknown_closes_active_canary():
     assert dbm.close_live_canaries(conn, "order_unknown", "default") == 1
     row = conn.execute("SELECT * FROM live_canary").fetchone()
     assert row["status"] == "CLOSED" and row["close_reason"] == "order_unknown"
+    assert dbm.close_live_canaries(conn, "second_reason", "default") == 0
+
+
+def test_canary_closes_when_order_limit_is_reached():
+    conn = dbm.get_conn(":memory:")
+    dbm.mark_system_readiness(conn, "P0_A", "suite-hash")
+    dbm.create_live_canary(conn, "default", ["AAPL.US"], "BUY", 1000, 1,
+                           _future(), "canary_count")
+    dbm.authorize_live_canary(
+        conn, account_id="default", plan_id="p1", client_request_id="cr1",
+        symbol="AAPL.US", side="BUY", quantity=1, reference_price=100)
+    row = conn.execute("SELECT * FROM live_canary").fetchone()
+    assert row["status"] == "CLOSED"
+    assert row["close_reason"] == "canary_order_limit_reached"
+
+
+def test_canary_closes_when_notional_limit_is_reached():
+    conn = dbm.get_conn(":memory:")
+    dbm.mark_system_readiness(conn, "P0_A", "suite-hash")
+    dbm.create_live_canary(conn, "default", ["AAPL.US"], "BUY", 100, 10,
+                           _future(), "canary_notional")
+    dbm.authorize_live_canary(
+        conn, account_id="default", plan_id="p1", client_request_id="cr1",
+        symbol="AAPL.US", side="BUY", quantity=1, reference_price=100)
+    row = conn.execute("SELECT * FROM live_canary").fetchone()
+    assert row["status"] == "CLOSED"
+    assert row["close_reason"] == "canary_notional_limit_reached"
+
+
+def test_expired_canary_is_closed_before_authorization():
+    conn = dbm.get_conn(":memory:")
+    dbm.mark_system_readiness(conn, "P0_A", "suite-hash")
+    conn.execute(
+        "INSERT INTO live_canary(canary_id,account_id,symbols_json,side,max_notional,"
+        "max_orders,expires_at,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        ("canary_expired", "default", '["AAPL.US"]', "BUY", 1000, 1,
+         "2000-01-01T00:00:00Z", "ACTIVE", "2000-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    with pytest.raises(RuntimeError, match="ACTIVE LIVE_CANARY"):
+        dbm.authorize_live_canary(
+            conn, account_id="default", plan_id="p1", client_request_id="cr1",
+            symbol="AAPL.US", side="BUY", quantity=1, reference_price=100)
+    row = conn.execute("SELECT * FROM live_canary").fetchone()
+    assert row["status"] == "CLOSED"
+    assert row["close_reason"] == "canary_expired"
