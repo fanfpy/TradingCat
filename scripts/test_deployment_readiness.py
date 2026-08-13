@@ -63,3 +63,24 @@ def test_acceptance_refuses_p0a_record_without_field_pass(monkeypatch):
 
     with pytest.raises(RuntimeError, match="现场检查 PASS"):
         acceptance_v5.main(["--no-connect", "--deployment-readiness", "--record-p0a"])
+
+
+def test_systemctl_output_is_decoded_as_utf8(monkeypatch):
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "状态"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(readiness.subprocess, "run", fake_run)
+    monkeypatch.setattr(readiness.platform, "system", lambda: "Linux")
+    result = readiness._systemctl(["is-active", "executiond.service"])
+
+    assert result == ("状态", "")
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"

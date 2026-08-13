@@ -42,6 +42,16 @@ LONGBRIDGE_ACCESS_TOKEN=...
 
 `tc` 输出适合终端阅读，部分命令支持 `--json`。
 
+Windows PowerShell 使用等价入口：
+
+```powershell
+.\tc.ps1 --help
+.\tc.ps1 market quote AAPL.US --json
+```
+
+Linux/macOS 使用 `./tc`；两者都会优先使用项目虚拟环境，未安装虚拟环境时才回退到
+本机 `python3`（Linux/macOS）或 `python`（Windows）。
+
 ### Agent 与系统集成：JSON 契约
 
 ```bash

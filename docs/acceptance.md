@@ -1,6 +1,6 @@
 # TradingCat 验收记录
 
-> 验收日期：2026-08-10  
+> 历史验收日期：2026-08-10
 > 架构基线：[architecture.md](architecture.md)  
 > 自动验收证据：`75828672565c14cb1edadaba4bf179445e7be7a431f5895724fd8f892a8c663b`
 
@@ -14,7 +14,7 @@ Agent 无关契约、研究可信性、个人投资者闭环和执行安全链�
 
 | 检查 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | PASS | 164 passed |
+| 全量测试 | PASS | 历史记录：164 passed；2026-08-13 复验：263 passed |
 | DRY_RUN 全链路 | PASS | 12/12 phases |
 | Application Contracts | PASS | Analyze/Follow/Review/Propose/Explain/RequestApproval |
 | Agent 等价响应 | PASS | 不同 Agent 输入得到结构等价的 `tradingcat.v1` 响应 |
@@ -69,12 +69,29 @@ Agent 无关契约、研究可信性、个人投资者闭环和执行安全链�
 ./.venv/bin/python -m pytest -q
 ./.venv/bin/python e2e_full.py
 ./.venv/bin/python scripts/acceptance_personal_loop.py
-./.venv/bin/python scripts/acceptance_v5.py
 ./.venv/bin/python scripts/acceptance_v5.py --no-connect
 ./.venv/bin/python scripts/check_open_source.py
 ```
 
 以上命令不会创建 Live Canary 或提交真实订单。
+
+## 2026-08-13 离线复验
+
+本次在 Windows worktree 中使用隔离的非存在 `TRADINGCAT_ENV_FILE`，未连接 Longbridge、
+未读取真实凭证、未创建 Canary、未提交订单：
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| `pip check` | PASS | `No broken requirements found` |
+| 全量 pytest | PASS | `263 passed` |
+| `e2e_full.py` | PASS | 12/12 phases |
+| `acceptance_v5.py --no-connect` | PASS | `automated_acceptance=PASS` |
+| `check_open_source.py` | PASS | `files_scanned=146` |
+| Linux/systemd P0-A | NOT_RUN | 当前环境为 Windows |
+| P0-B 真实订单 | NOT_RUN | 需要用户明确授权；本次未连接券商 |
+
+验收脚本在 Windows 非 UTF-8 locale 下的子进程输出读取问题已修复为 UTF-8 且非法字节
+安全替换，避免丢失验收证据。当前系统仍为 `DRY_RUN_ONLY`。
 
 ## 仍需人工完成
 

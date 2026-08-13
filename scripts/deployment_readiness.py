@@ -44,7 +44,8 @@ def _result(status, reason, **details):
 def _systemctl(args):
     try:
         proc = subprocess.run(
-            ["systemctl", *args], text=True, capture_output=True, check=False,
+            ["systemctl", *args], text=True, encoding="utf-8", errors="replace",
+            capture_output=True, check=False,
             timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
