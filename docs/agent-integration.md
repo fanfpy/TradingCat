@@ -43,9 +43,11 @@ SDK。正式支持版本固定为 `longbridge==4.4.3`。
 | `approve` | 记录可信人工审批 | 只接受完整、签名的 `ApprovalProof`；Agent 不得生成 |
 | `execute` | 执行已批准计划 | 只接受 `plan_id`、`confirmation_id`；由 executiond 执行 |
 
-`propose` 收到 `mode=LIVE` 会生成不可变计划并返回 `PENDING_APPROVAL`，不会批准或提交；
-`paper` 始终强制 `PAPER`。LIVE 的批准必须来自可信人工审批通道，执行必须经过
-executiond。
+`propose` 收到 `mode=LIVE` 只有在账户为 `SYNCED` 且存在非空可执行订单时才会生成不可变计划
+并返回 `PENDING_APPROVAL`；不会批准或提交。没有可执行订单时返回 `NO_ACTION` 或
+`BLOCKED`，`execution_plan=null`、`requires_explicit_human_approval=false`、
+`approval_status=null`，且不会持久化空 LIVE 计划。`paper` 始终强制 `PAPER`。LIVE 的批准
+必须来自可信人工审批通道，执行必须经过 executiond。
 
 ## 3. 意图分发表
 
@@ -59,7 +61,7 @@ executiond。
 | “建议买多少” | 生成建议计划 | `propose-trade` | 是 | 展示权重、plan_hash，等待用户决策 |
 | “申请审批这个计划” | 创建待审批请求 | `request-approval` | 是 | 结果只能是 PENDING |
 | “为什么建议这笔交易” | 解释证据 | `explain-decision` | 否 | 引用策略、数据、政策和审计 ID |
-| “直接帮我买” | 不直接跳过审批 | 先 `propose-trade`；明确要求 LIVE 时再走审批链 | 计划写入 | 展示计划和 hash；保持 PENDING，等待可信人工审批 |
+| “直接帮我买” | 不直接跳过审批 | 先 `propose-trade`；明确要求 LIVE 且返回非空计划时再走审批链 | 仅非空计划写入 | 展示计划和 hash；仅确有订单时保持 PENDING，等待可信人工审批 |
 
 用户只提出分析、解释或 review 时，不要扩大为关注、同步账户、创建计划或申请审批。
 
@@ -162,6 +164,9 @@ printf '%s' '{"equity":100000,"account_id":"default","mode":"DRY_RUN"}' |
 
 - `target_portfolio.passed=false`：新买入目标已经归零，不得自行缩量后重试。
 - `execution_plan=null`：没有可审批计划。
+- LIVE 空结果的 `data.status` 为 `NO_ACTION` 或 `BLOCKED`；使用 `data.error.code`、
+  `data.details` 和 `warnings` 区分无信号、研究不合格、账户非 `SYNCED`、风控拒绝或
+  没有可执行订单。
 - 有计划：展示完整订单、`plan_id`、`plan_hash`、失效时间和 lineage。
 - `requires_explicit_human_approval=true` 只表示需要审批，不表示已经批准。
 - Agent 默认只使用 `PAPER`；不能根据用户含糊表述切换为 LIVE。
@@ -287,8 +292,9 @@ Agent 永远不得：
 - 创建 Live Canary 或在自动验收中运行真实订单。
 
 若用户明确要求真实交易，先读取 `docs/live-trading-checklist.md`，确认 P0-A/P0-B 状态。
-没有生产部署验收、账户同步、可信人工审批和 Canary 范围时，只能创建
-`PENDING_APPROVAL` 计划，不能调用 `execute`。
+没有生产部署验收、账户同步、可信人工审批和 Canary 范围时，不能调用 `execute`；若账户
+未 `SYNCED` 或没有非空订单，提案应保持 `BLOCKED`/`NO_ACTION`，不能创建空
+`PENDING_APPROVAL` 计划。
 
 ## 9. Agent 对用户的标准回答结构
 

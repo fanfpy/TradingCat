@@ -372,38 +372,87 @@ class TradingCatApplication:
             )
 
         target = run_decision(self.core, equity, account_state, as_of)
-        plan = target_to_execution_plan(
-            self.core, target, equity, account_id, mode, account_state)
-        if plan is None and mode == "LIVE":
-            # LIVE proposal must still produce an immutable, auditable plan even
-            # when risk/position sizing yields no orders.  It is never executable
-            # by this layer; approval remains a separate explicit step.
-            from datetime import datetime, timedelta, timezone
-            from execution.models import ExecutionPlan
-            expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
-                "%Y-%m-%dT%H:%M:%SZ")
-            plan = ExecutionPlan(
-                plan_id=f"plan_{uuid.uuid4().hex[:12]}", account_id=account_id,
-                execution_mode="LIVE", expires_at=expires_at, orders=(),
-            )
-            dbm.insert_plan(
-                self.core, plan.plan_id, plan.account_id, plan.execution_mode,
-                plan.expires_at, plan.plan_hash, [],
-            )
+        account_sync_status = (
+            getattr(account_state, "sync_status", None)
+            if account_state is not None else "UNKNOWN"
+        )
+        live_account_blocked = mode == "LIVE" and account_sync_status != "SYNCED"
+        plan = None
+        if not live_account_blocked:
+            plan = target_to_execution_plan(
+                self.core, target, equity, account_id, mode, account_state)
+            if plan is not None and not plan.orders:
+                # Keep the application contract defensive if a lower layer
+                # ever returns an empty plan in the future.
+                plan = None
+
+        status = "PENDING_APPROVAL" if plan is not None and mode == "LIVE" else "PROPOSED"
+        proposal_error = None
+        proposal_details = dict(target.details or {})
+        proposal_warnings = [] if target.passed else ["组合风控未通过；新买入目标已归零"]
+
+        if mode == "LIVE" and plan is None:
+            # An empty LIVE result is a business outcome, never an approvable
+            # plan.  Keep the reason in stable fields for Agent consumers.
+            if live_account_blocked:
+                reason_code = "ACCOUNT_NOT_SYNCED"
+                status = "BLOCKED"
+                message = (
+                    f"账户状态为 {account_sync_status}；LIVE 提案要求账户为 SYNCED，"
+                    "未创建或持久化 ExecutionPlan"
+                )
+                proposal_warnings.append(message)
+            elif target.failures:
+                reason_code = "PORTFOLIO_RISK_REJECTED"
+                status = "BLOCKED"
+                message = "组合风控未通过；未创建或持久化 LIVE ExecutionPlan"
+                proposal_warnings.append(message)
+            elif target.details.get("signal_count", 0) == 0:
+                research_statuses = target.details.get("research_statuses", {})
+                ineligible = {
+                    key: value for key, value in research_statuses.items()
+                    if value not in ("verified", "live")
+                }
+                if ineligible or not research_statuses:
+                    reason_code = "RESEARCH_NOT_ELIGIBLE"
+                    status = "BLOCKED"
+                    message = "研究状态不具备 LIVE 新入场资格；未创建或持久化 ExecutionPlan"
+                else:
+                    reason_code = "NO_SIGNAL"
+                    status = "NO_ACTION"
+                    message = "当前没有可执行交易信号；未创建或持久化 ExecutionPlan"
+                proposal_warnings.append(message)
+            else:
+                reason_code = "NO_EXECUTABLE_ORDERS"
+                status = "NO_ACTION"
+                message = "决策结果没有非空可执行订单；未创建或持久化 ExecutionPlan"
+                proposal_warnings.append(message)
+            proposal_details.update({
+                "reason_code": reason_code,
+                "account_sync_status": account_sync_status,
+                "orders_count": 0,
+            })
+            proposal_error = {
+                "code": reason_code,
+                "message": message,
+                "retryable": reason_code in {"ACCOUNT_NOT_SYNCED", "RESEARCH_NOT_ELIGIBLE"},
+            }
+        elif plan is not None:
+            proposal_details["orders_count"] = len(plan.orders)
         return _envelope(
             "ProposeTrade", data={
-                "status": ("PENDING_APPROVAL" if plan is not None and mode == "LIVE"
-                           else "PROPOSED"),
+                "status": status,
+                "error": proposal_error,
                 "target_portfolio": {
                     "passed": target.passed, "failures": target.failures,
-                    "final_fracs": target.final_fracs, "details": target.details,
+                    "final_fracs": target.final_fracs, "details": proposal_details,
                 },
                 "execution_plan": plan.to_dict() if plan else None,
+                "details": proposal_details,
                 "requires_explicit_human_approval": plan is not None,
-                "approval_status": ("PENDING_APPROVAL" if plan is not None and mode == "LIVE"
-                                    else None),
+                "approval_status": "PENDING_APPROVAL" if plan is not None and mode == "LIVE" else None,
             },
-            warnings=[] if target.passed else ["组合风控未通过；新买入目标已归零"],
+            warnings=proposal_warnings,
             lineage={"plan_id": plan.plan_id if plan else None},
         )
 

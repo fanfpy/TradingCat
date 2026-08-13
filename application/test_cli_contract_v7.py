@@ -48,12 +48,50 @@ def test_short_status_and_report_operations_use_the_same_envelope(monkeypatch):
     assert conn.execute("SELECT count(*) FROM security_master").fetchone()[0] == 0
 
 
-def test_propose_live_creates_pending_approval_plan():
+def test_propose_live_without_orders_is_not_approvable_or_persisted():
     app = TradingCatApplication(dbm.get_core_conn(":memory:"))
     result = app.propose_trade(100_000, mode="LIVE")
     assert result["ok"] is True
+    assert result["data"]["status"] == "BLOCKED"
+    assert result["data"]["error"]["code"] == "ACCOUNT_NOT_SYNCED"
+    assert result["data"]["execution_plan"] is None
+    assert result["data"]["requires_explicit_human_approval"] is False
+    assert result["data"]["approval_status"] is None
+    assert result["data"]["details"]["orders_count"] == 0
+    assert app.core.execute(
+        "SELECT count(*) FROM execution_plan WHERE execution_mode='LIVE'"
+    ).fetchone()[0] == 0
+
+
+def test_propose_live_with_nonempty_orders_is_pending(monkeypatch):
+    from execution.models import ExecutionPlan, PlanOrder
+    from production.target_portfolio import TargetPortfolio
+    from shared.account import AccountState
+
+    core = dbm.get_core_conn(":memory:")
+    app = TradingCatApplication(core)
+    target = TargetPortfolio(
+        intents=[], final_fracs={"AAPL.US": 0.01}, passed=True,
+        details={"signal_count": 1, "research_statuses": {"AAPL.US": "verified"}},
+    )
+    plan = ExecutionPlan(
+        "contract_live_nonempty", "default", "LIVE", "2099-12-31T23:59:59Z",
+        (PlanOrder("1", "AAPL.US", "BUY", 1, reference_price=100.0),),
+    )
+    monkeypatch.setattr("production.decision.run_decision", lambda *args: target)
+    monkeypatch.setattr(
+        "production.decision.target_to_execution_plan",
+        lambda *args, **kwargs: plan,
+    )
+
+    result = app.propose_trade(
+        100_000, mode="LIVE", account_state=AccountState(sync_status="SYNCED"),
+    )
+
     assert result["data"]["status"] == "PENDING_APPROVAL"
-    assert result["data"]["execution_plan"]["execution_mode"] == "LIVE"
+    assert result["data"]["execution_plan"]["orders"]
+    assert result["data"]["requires_explicit_human_approval"] is True
+    assert result["data"]["approval_status"] == "PENDING_APPROVAL"
 
 
 def test_status_exposes_paper_default_and_live_pending_only():

@@ -195,6 +195,9 @@ def run_decision(conn, equity: float, account_state=None,
         policy=policy,
     )
     tp.details["signal_count"] = len(signals)
+    tp.details["research_statuses"] = {
+        row["symbol"]: row["status"] for row in dbm.list_lifecycle(conn)
+    }
     tp.details["investor_policy_version_id"] = policy_row["policy_version_id"]
     tp.details["investor_policy_hash"] = policy_row["config_hash"]
     return tp
