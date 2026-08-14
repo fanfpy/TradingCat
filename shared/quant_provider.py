@@ -64,12 +64,14 @@ class LongbridgeQuantProvider:
         version = None
         try:
             checked = self.runner(
-                [path, "--version"], text=True, capture_output=True,
+                [path, "--version"], text=True, encoding="utf-8", errors="replace",
+                capture_output=True,
                 timeout=10, check=False)
             version = (checked.stdout or checked.stderr or "").strip() or None
             help_result = self.runner(
                 [path, "quant", "run", "--help"], text=True,
-                capture_output=True, timeout=10, check=False)
+                encoding="utf-8", errors="replace", capture_output=True,
+                timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return QuantCapability(False, self.name, path, version, str(exc))
         if help_result.returncode != 0:
@@ -90,7 +92,8 @@ class LongbridgeQuantProvider:
             capability.cli_path, "quant", "run", symbol,
             "--start", start, "--end", end,
             "--format", "json", "--script", script,
-        ], text=True, capture_output=True, timeout=self.timeout, check=False)
+        ], text=True, encoding="utf-8", errors="replace", capture_output=True,
+            timeout=self.timeout, check=False)
         if completed.returncode != 0:
             message = (completed.stderr or completed.stdout or "quant run failed").strip()
             raise RuntimeError(

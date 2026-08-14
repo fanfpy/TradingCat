@@ -45,6 +45,8 @@ def test_quant_preview_uses_argv_parses_nested_report_and_stays_research_only():
     assert run_argv[:4] == ["/usr/bin/longbridge", "quant", "run", "AAPL.US"]
     assert run_argv[-2:] == ["--script", 'strategy("x");']
     assert "shell" not in run_kwargs
+    assert run_kwargs["encoding"] == "utf-8"
+    assert run_kwargs["errors"] == "replace"
     assert result.performance["netProfitPercent"] == 12.3
     assert result.research_only is True
 

@@ -19,14 +19,28 @@ from scripts.deployment_readiness import run_deployment_readiness
 
 
 def _run(command):
+    # Acceptance output contains Chinese text and must remain readable on
+    # Windows locales whose default encoding is not UTF-8.  Replacement is
+    # preferable to a background reader UnicodeDecodeError that can otherwise
+    # leave the report looking successful while losing subprocess evidence.
     proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
                           env={**os.environ, "PYTHONPATH": str(ROOT)})
     return {"command": command, "passed": proc.returncode == 0,
             "returncode": proc.returncode,
             "output_tail": (proc.stdout + proc.stderr)[-4000:]}
 
 
+def _configure_output() -> None:
+    """Keep the machine-readable report printable on Windows locales."""
+    stream = getattr(sys, "stdout", None)
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None) -> int:
+    _configure_output()
     parser = argparse.ArgumentParser(description="v5 P0-A/P1/P2 自动验收")
     parser.add_argument("--no-connect", action="store_true",
                         help="跳过 Longbridge 只读行情连通测试")

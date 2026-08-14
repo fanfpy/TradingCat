@@ -39,6 +39,18 @@ Use `./tc` for human-facing and operational commands:
 ./tc market quote AAPL.US --json
 ```
 
+On Windows PowerShell, use the repository wrapper with the same arguments:
+
+```powershell
+.\tc.ps1 --help
+.\tc.ps1 market quote AAPL.US --json
+```
+
+The wrapper prefers `.venv\Scripts\python.exe`, then checks usable `python`, `py -3`, and
+`python3` installations. If none is a working Python 3.10+ interpreter, it exits with an
+actionable installation error instead of blindly invoking a broken launcher. Linux/macOS
+continues to use `./tc` and `.venv/bin/python`.
+
 Do not parse human-readable CLI text when a corresponding JSON contract exists.
 
 Dispatch user intent as follows:
