@@ -14,7 +14,7 @@ Agent 无关契约、研究可信性、个人投资者闭环和执行安全链�
 
 | 检查 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | PASS | 历史记录：164 passed；2026-08-13 复验：263 passed |
+| 全量测试 | PASS | 历史记录：164 passed；2026-08-14 复验：272 passed |
 | DRY_RUN 全链路 | PASS | 12/12 phases |
 | Application Contracts | PASS | Analyze/Follow/Review/Propose/Explain/RequestApproval |
 | Agent 等价响应 | PASS | 不同 Agent 输入得到结构等价的 `tradingcat.v1` 响应 |
@@ -83,7 +83,7 @@ Agent 无关契约、研究可信性、个人投资者闭环和执行安全链�
 | 检查 | 结果 | 证据 |
 |---|---|---|
 | `pip check` | PASS | `No broken requirements found` |
-| 全量 pytest | PASS | `263 passed` |
+| 全量 pytest | PASS | `272 passed` |
 | `e2e_full.py` | PASS | 12/12 phases |
 | `acceptance_v5.py --no-connect` | PASS | `automated_acceptance=PASS` |
 | `check_open_source.py` | PASS | `files_scanned=146` |
