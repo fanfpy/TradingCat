@@ -4,12 +4,6 @@
 
 # TradingCat
 
-## 第一阶段执行计划契约
-
-应用层默认 `PAPER`；`LIVE` 必须显式指定。`propose(mode="LIVE")` 仅在账户为 `SYNCED` 且存在非空订单时生成并持久化不可变 `ExecutionPlan`，返回 `PENDING_APPROVAL`；无可执行订单时返回 `NO_ACTION` 或 `BLOCKED`，不会持久化空计划、批准、执行、读取真实凭证或提交订单。
-
-调用 `request-approval` 时必须同时提供 `plan_id` 与 `plan_hash`，可提供 `idempotency_key`。同一幂等键绑定同一计划时会返回同一个 confirmation；不同计划复用该键会被拒绝。confirmation 的 `expires_at` 不会晚于对应 plan 的 `expires_at`。
-
 [English](README_EN.md)
 
 TradingCat 是一个面向个人投资者的、Agent 无关的量化研究与交易决策系统。它把股票
@@ -20,6 +14,39 @@ QwenPaw、Codex、Trae 等上层 Agent 可替换。
 可信 `ApprovalProof` → executiond 执行 → 成交回报与对账”，但生产真实订单仍必须经过
 独立 executiond、有效的人工 `ApprovalProof`、审批后风控、P0-A 部署验收和显式 Live Canary。
 Agent 可以调用 `execute` 转发已批准的计划，但不能创建或伪造 `ApprovalProof`。
+
+## 先从一句话开始
+
+把仓库交给支持 Skill 的 Agent（Codex、Trae、WorkBuddy、OpenClaw 等），让它先读取根目录
+`SKILL.md`。第一次使用时可以直接说：
+
+- “TradingCat 怎么用？先只读检查环境，不要安装或修改任何东西。”
+- “分析苹果公司；如果缺少数据，先告诉我需要做什么，不要自动下载。”
+- “查看当前持仓和风险；不要同步账户，除非我明确同意。”
+- “用 PAPER 模式演练一笔 AAPL 交易，绝不触达实盘。”
+- “生成交易建议供我审批，不要批准，也不要执行。”
+
+Agent 应先确认你的目标，说明当前能力和限制，只推荐一个下一步。安装依赖、修改 `.env`、
+下载行情、运行研究、添加关注、同步账户、生成持久化计划、请求审批和执行都需要明确授权。
+
+如果不使用 Agent，也可以从 `./tc --help`（Linux/macOS）或 `.\tc.ps1 --help`
+（Windows PowerShell）开始。
+
+## 先看懂这些状态
+
+| 状态 | 用户含义 |
+|---|---|
+| `仅分析` | 只读解释，没有改变系统状态 |
+| `研究不足` / `研究已验证` | 策略证据尚未满足要求 / 已通过研究门禁 |
+| `PAPER` | 仅模拟，不会触达真实券商订单 |
+| `NO_ACTION` | 当前没有需要执行的订单 |
+| `BLOCKED` | 数据、账户、风控或对账门禁阻止继续 |
+| `PENDING_APPROVAL` | 等待真实用户审批，不代表已经批准 |
+| `已批准但未执行` | 已有可信审批，但尚未提交订单 |
+| `已提交等待对账` | 已提交，不代表已经成交或完成对账 |
+
+请始终记住：关注不等于具备交易资格，`verified` 不等于用户批准，
+`PENDING_APPROVAL` 不等于已经批准，`SUBMITTED` 不等于已经成交。
 
 ## 能力概览
 
@@ -89,6 +116,17 @@ cp .env.example .env
 不会读取 Longbridge CLI OAuth token，也不会弹出浏览器认证。SDK 基本面能力按运行时能力探测；
 未配置合格的 PIT 数据源时基本面仍明确显示为缺失，技术研究与安全执行链不受影响。
 
+Windows PowerShell：
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\pip.exe install -r requirements.txt
+Copy-Item .env.example .env
+.\tc.ps1 --help
+```
+
+创建 `.env` 和安装依赖都会改变本机环境；通过 Agent 操作时，应先获得用户明确同意。
+
 ## 个人投资闭环
 
 ```bash
@@ -154,6 +192,17 @@ printf '%s' '{"plan_id":"plan_xxx","confirmation_id":"cfm_xxx"}' |
 
 `execute` 只接受 `plan_id` 和 `confirmation_id`，不会接受或合并 symbol、side、quantity、
 price 等订单覆盖字段。
+
+### 第一阶段执行计划契约
+
+应用层默认 `PAPER`；`LIVE` 必须显式指定。`propose(mode="LIVE")` 仅在账户为 `SYNCED`
+且存在非空订单时生成并持久化不可变 `ExecutionPlan`，返回 `PENDING_APPROVAL`；无可执行
+订单时返回 `NO_ACTION` 或 `BLOCKED`，不会持久化空计划、批准、执行、读取真实凭证或
+提交订单。
+
+调用 `request-approval` 时必须同时提供 `plan_id` 与 `plan_hash`，可提供
+`idempotency_key`。同一幂等键绑定同一计划时会返回同一个 confirmation；不同计划复用
+该键会被拒绝。confirmation 的 `expires_at` 不会晚于对应 plan 的 `expires_at`。
 
 ## 安全边界
 

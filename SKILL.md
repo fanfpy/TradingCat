@@ -1,12 +1,46 @@
 ---
 name: trading-system
-description: Agent-independent personal quantitative investing workflow for stock analysis, strategy research and backtesting, watchlists and signal monitoring, Kelly position sizing, portfolio review, immutable trade proposals, trusted approval requests, identifier-only execution, reconciliation, and audit explanations. Use when a user asks TradingCat to analyze or follow a stock, validate a strategy, monitor buy/sell signals, review holdings, recommend target allocation, prepare a trade plan, request approval, execute an already approved plan, or inspect the system's research and execution evidence.
+description: Agent-independent personal quantitative investing workflow for onboarding and help, stock analysis, strategy research and backtesting, watchlists and signal monitoring, Kelly position sizing, portfolio review, immutable trade proposals, trusted approval requests, identifier-only execution, reconciliation, and audit explanations. Use when a user asks how to use, install, configure, or start TradingCat; asks what it can do or what to do next; or asks TradingCat to analyze or follow a stock, validate a strategy, monitor signals, review holdings, recommend target allocation, prepare a trade plan, request approval, execute an already approved plan, or inspect research and execution evidence.
 ---
 
 # TradingCat
 
 Operate the TradingCat quantitative research and decision system through its stable interfaces.
 Keep the interaction layer independent of QwenPaw, Codex, Trae, or any other Agent runtime.
+
+## Guide the first interaction
+
+When the user asks how to use TradingCat, what it can do, or how to get started:
+
+1. Ask or infer whether the immediate goal is stock analysis, strategy research, portfolio review,
+   or a PAPER exercise. Do not lead with LIVE execution.
+2. Start with read-only inspection of the repository, interpreter, configuration presence, and
+   current system/account state. Never reveal secret values.
+3. Explain the available capability, current limitation, and safety mode in plain language.
+4. Offer the smallest useful action and obtain consent before any side effect.
+5. End with one current-state label and exactly one recommended next step.
+
+Do not install dependencies, create or edit `.env`, fetch or cache market data, run research,
+change a watchlist, sync an account, reconcile orders, persist a trade plan, request approval, or
+execute a plan unless the user explicitly asks for that side effect. A request to analyze, review,
+explain, or teach is read-only by default.
+
+Use these user-facing state labels consistently:
+
+| Label | Meaning |
+|---|---|
+| `仅分析` | Read-only explanation; no workflow state was changed |
+| `研究不足` | Evidence is missing, stale, or not frozen |
+| `研究已验证` | Frozen strategy evidence passed the required research gates |
+| `PAPER` | Simulated planning or execution only |
+| `NO_ACTION` | No executable order is needed |
+| `BLOCKED` | A safety, data, account, or reconciliation gate stopped progress |
+| `PENDING_APPROVAL` | A plan is waiting for trusted human approval; it is not approved |
+| `已批准但未执行` | Trusted approval exists, but no order has been submitted |
+| `已提交等待对账` | Submission exists; fill and reconciliation are not yet final |
+
+Always preserve these distinctions: following is not trade eligibility; `verified` is not user
+approval; `PENDING_APPROVAL` is not approval; and `SUBMITTED` is not a fill.
 
 ## Read only what the task needs
 
@@ -51,6 +85,10 @@ The wrapper prefers `.venv\Scripts\python.exe`, then checks usable `python`, `py
 actionable installation error instead of blindly invoking a broken launcher. Linux/macOS
 continues to use `./tc` and `.venv/bin/python`.
 
+For Agent JSON operations, prefer the project interpreter at `.venv\Scripts\python.exe` on
+Windows or `.venv/bin/python` on Linux/macOS. If it is absent or unusable, stop and explain the
+setup option; do not silently install packages or fall back to an uncertain system interpreter.
+
 Do not parse human-readable CLI text when a corresponding JSON contract exists.
 
 Dispatch user intent as follows:
@@ -72,9 +110,11 @@ Do not expand an analysis request into follow, account sync, proposal, approval,
 ## Run a stock-analysis workflow
 
 1. Resolve the requested name or symbol; do not guess when multiple securities match.
-2. Ensure enough completed daily bars are cached.
-3. Run prefilter and research when no current frozen strategy evidence exists.
-4. Call `AnalyzeSecurity` and surface technical factors, research status, strategy suitability,
+2. Inspect existing completed-bar coverage and frozen strategy evidence without changing state.
+3. If data or evidence is missing, explain the gap and ask before caching data or running
+   prefilter/research.
+4. Call `AnalyzeSecurity` when its prerequisites are already present or the user approved them,
+   and surface technical factors, research status, strategy suitability,
    data quality, warnings, and lineage.
 5. State explicitly whether the result is `verified`, research-only, degraded, or blocked.
 6. Never present missing fundamentals as zero or silently substitute current data into history.
@@ -108,8 +148,10 @@ printf '{"query":"AAPL","reason":"等待趋势信号"}' |
 
 ## Run a portfolio workflow
 
-1. Sync account state when credentials and read-only access are available.
-2. Call `ReviewPortfolio` for KEEP/ADD/REDUCE/EXIT, current weight, target range, stop, rationale,
+1. Inspect the existing account snapshot and state. Ask before invoking account sync, even when
+   credentials and read-only broker access are available.
+2. Call `ReviewPortfolio` against the existing snapshot for KEEP/ADD/REDUCE/EXIT, current weight,
+   target range, stop, rationale,
    and risk flags.
 3. Treat shrinkage Kelly as one upper bound, not an instruction to invest that amount.
 4. Preserve portfolio constraints for concentration, correlation, sector, currency, beta,
