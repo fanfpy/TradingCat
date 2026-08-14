@@ -39,5 +39,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.reasonix/
 *.swp
 *.log

@@ -1,4 +1,4 @@
 interface:
   display_name: "TradingCat"
-  short_description: "Quant research, monitoring, portfolio, and safe execution"
-  default_prompt: "Use $trading-system to analyze a stock, validate its strategy evidence, and explain the safe next action."
+  short_description: "面向个人投资者的量化研究、持仓管理与人工审批安全执行"
+  default_prompt: "使用 $trading-system 先只读检查当前环境，告诉我 TradingCat 能做什么，并根据我的目标只推荐一个安全的下一步。"
