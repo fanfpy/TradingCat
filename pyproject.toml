@@ -20,7 +20,7 @@ classifiers = [
   "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
-  "longbridge==4.4.3",
+  "longbridge==4.5.0",
   "PyYAML>=6.0",
   "pandas>=2.0",
   "numpy>=1.24",
